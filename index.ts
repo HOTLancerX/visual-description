@@ -17,6 +17,7 @@ import VisualDescriptionField from "./ui/VisualDescriptionField";
 import VisualDescriptionRenderer from "./ui/VisualDescriptionRenderer";
 import VisualPreviewModal from "./ui/VisualPreviewModal";
 import VisualDescriptionSettingsPage from "./settings/VisualDescriptionSettingsPage";
+import { XIAOMI_MASTER_PREBUILT_CSS } from "./presets/xiaomiPrebuiltCss";
 
 export { VisualDescriptionField, VisualDescriptionRenderer, VisualPreviewModal, VisualDescriptionSettingsPage };
 export * from "./types";
@@ -88,6 +89,21 @@ export function register(): void {
                 style: "left",
                 position: 10,
                 path: VisualDescriptionSettingsPage,
+            },
+        ],
+        activeNx
+    );
+
+    // ─── 4. Dynamic Head CSS Hook ─────────────────────────────────────────────
+    addHook(
+        "head.css",
+        [
+            {
+                key: "visual-description-prebuilt-css",
+                id: "visual-description-prebuilt-css",
+                position: 50,
+                getCss: (settings: any) =>
+                    settings?.visual_description_css || XIAOMI_MASTER_PREBUILT_CSS,
             },
         ],
         activeNx
