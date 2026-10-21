@@ -1,0 +1,353 @@
+/**
+ * htmlToJsonParser.ts
+ *
+ * Authentic HTML parser for Product Visual Descriptions.
+ * Converts raw source HTML into clean, organized JSON sections with full metadata.
+ * Does NOT save raw unparsed HTML blob; converts into structured VisualSection[].
+ *
+ * Preserves authentic tags & classes (ndovu-why, ndovu-scene, scene-video, scene-gallery)
+ * inside each individual section so the pre-built CSS matches with 100% design fidelity.
+ */
+
+import type {
+    VisualDescriptionData,
+    VisualSection,
+    VisualSectionType,
+    VisualSectionMetric,
+    VisualSectionMediaItem,
+} from "../types";
+
+/**
+ * Classifies an element into a recognizable VisualSectionType
+ */
+function classifySectionType(el: Element): VisualSectionType {
+    const cls = el.className || "";
+    const id = el.id || "";
+
+    if (cls.includes("ndovu-why") || id === "why") {
+        return "highlights-grid";
+    }
+    if (cls.includes("ndovu-catalog-compare") || cls.includes("ndovu-comparison") || id.includes("compare") || id.includes("comparison")) {
+        return "comparison";
+    }
+    if (cls.includes("scene-video") || el.querySelector("video")) {
+        return "scene-video";
+    }
+    if (cls.includes("scene-gallery") || cls.includes("ndovu-scene-cards") || el.getAttribute("data-cards-mode") === "carousel") {
+        return "scene-gallery";
+    }
+    if (cls.includes("scene-accordion") || cls.includes("ndovu-tour") || el.getAttribute("data-viewer-style") === "product-tour") {
+        return "scene-accordion";
+    }
+    if (cls.includes("scene-metrics") || el.querySelector(".ndovu-scene-metrics, dl")) {
+        return "scene-metrics";
+    }
+    if (cls.includes("scene-tabs") || el.querySelector(".ndovu-scene-tabs, [role='tablist']")) {
+        return "scene-tabs";
+    }
+    if (cls.includes("xiaomi-story")) {
+        return "story-split";
+    }
+    return "generic";
+}
+
+/**
+ * Extracts structured metrics from a section (e.g. .ndovu-why__tile or dl/dt/dd)
+ */
+function extractMetrics(el: Element): VisualSectionMetric[] {
+    const metrics: VisualSectionMetric[] = [];
+
+    // 1. .ndovu-why tiles
+    const tiles = Array.from(el.querySelectorAll(".ndovu-why__tile"));
+    tiles.forEach((tile) => {
+        const valEl = tile.querySelector(".ndovu-why__value");
+        const capEl = tile.querySelector(".ndovu-why__caption, .ndovu-why__kicker");
+        if (valEl) {
+            metrics.push({
+                value: valEl.textContent?.trim() || "",
+                label: capEl?.textContent?.trim() || "",
+            });
+        }
+    });
+
+    // 2. Definition lists (.ndovu-scene-metrics dl div)
+    if (metrics.length === 0) {
+        const dls = Array.from(el.querySelectorAll("dl div, dl.ndovu-scene-metrics > div"));
+        dls.forEach((div) => {
+            const dt = div.querySelector("dt");
+            const dd = div.querySelector("dd");
+            if (dt) {
+                metrics.push({
+                    value: dt.textContent?.trim() || "",
+                    label: dd?.textContent?.trim() || "",
+                });
+            }
+        });
+    }
+
+    return metrics;
+}
+
+/**
+ * Extracts media items (videos and images) from a section
+ */
+function extractMedia(el: Element): VisualSectionMediaItem[] {
+    const media: VisualSectionMediaItem[] = [];
+
+    // Videos
+    const videos = Array.from(el.querySelectorAll("video"));
+    videos.forEach((v) => {
+        const src = v.getAttribute("src") || v.querySelector("source")?.getAttribute("src") || "";
+        const poster = v.getAttribute("poster") || "";
+        const alt = v.getAttribute("aria-label") || "";
+        if (src || poster) {
+            media.push({
+                type: "video",
+                url: src,
+                poster: poster || undefined,
+                alt: alt || undefined,
+            });
+        }
+    });
+
+    // Images
+    const imgs = Array.from(el.querySelectorAll("img"));
+    imgs.forEach((img) => {
+        const src = img.getAttribute("src") || "";
+        if (src && !src.includes("data:image/svg+xml")) {
+            media.push({
+                type: "image",
+                url: src,
+                alt: img.getAttribute("alt") || undefined,
+            });
+        }
+    });
+
+    return media;
+}
+
+/**
+ * Cleans and resolves media attributes in a DOM tree
+ */
+function cleanAndResolveDom(doc: Document) {
+    // 1. Remove script tags for safety
+    Array.from(doc.querySelectorAll("script")).forEach((s) => s.remove());
+
+    // 2. Resolve lazy images
+    Array.from(doc.querySelectorAll("img")).forEach((img) => {
+        const lazySrc =
+            img.getAttribute("data-src") ||
+            img.getAttribute("data-lazy-src") ||
+            img.getAttribute("data-original") ||
+            img.getAttribute("data-url");
+        if (lazySrc && !img.getAttribute("src")) {
+            img.setAttribute("src", lazySrc.trim());
+        }
+        if (!img.getAttribute("loading")) {
+            img.setAttribute("loading", "lazy");
+        }
+    });
+
+    // 3. Resolve lazy videos
+    Array.from(doc.querySelectorAll("video")).forEach((video) => {
+        const poster =
+            video.getAttribute("data-ndovu-poster") ||
+            video.getAttribute("data-poster") ||
+            video.getAttribute("data-ndovu-mobile-poster");
+        if (poster && !video.getAttribute("poster")) {
+            video.setAttribute("poster", poster.trim());
+        }
+        Array.from(video.querySelectorAll("source")).forEach((source) => {
+            const dataSrc = source.getAttribute("data-ndovu-src") || source.getAttribute("data-src");
+            if (dataSrc && !source.getAttribute("src")) {
+                source.setAttribute("src", dataSrc.trim());
+            }
+        });
+        const directSrc = video.getAttribute("data-ndovu-src") || video.getAttribute("data-src");
+        if (directSrc && !video.getAttribute("src")) {
+            video.setAttribute("src", directSrc.trim());
+        }
+    });
+}
+
+/**
+ * Parses raw HTML string into structured VisualDescriptionData JSON
+ */
+export function parseHtmlToVisualData(rawHtml: string): VisualDescriptionData {
+    if (!rawHtml || typeof rawHtml !== "string" || !rawHtml.trim()) {
+        return {
+            version: "1.0.0",
+            sections: [],
+            stats: { sectionCount: 0, imageCount: 0, videoCount: 0, charCount: 0 },
+        };
+    }
+
+    let customCss = "";
+    const sections: VisualSection[] = [];
+    let totalImages = 0;
+    let totalVideos = 0;
+
+    // Browser environment with DOMParser
+    if (typeof window !== "undefined" && typeof window.DOMParser !== "undefined") {
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(rawHtml, "text/html");
+
+            // Extract all <style> blocks
+            Array.from(doc.querySelectorAll("style")).forEach((styleEl) => {
+                const cssText = styleEl.textContent || "";
+                if (cssText.trim()) {
+                    customCss += `\n${cssText.trim()}\n`;
+                }
+                styleEl.remove();
+            });
+
+            // Clean & resolve media
+            cleanAndResolveDom(doc);
+
+            // Find all candidate section elements
+            let sectionEls = Array.from(
+                doc.querySelectorAll(".ndovu-why, article.ndovu-scene, .ndovu-catalog-compare, .xiaomi-story")
+            );
+
+            // If none of those specialized classes were found, grab top-level sections / articles
+            if (sectionEls.length === 0) {
+                const rootChildren = Array.from(doc.body.children);
+                if (rootChildren.length === 1 && rootChildren[0].classList.contains("xiaomi-ux3b2-components")) {
+                    sectionEls = Array.from(rootChildren[0].querySelectorAll("section, article"));
+                } else {
+                    sectionEls = Array.from(doc.querySelectorAll("section, article"));
+                }
+            }
+
+            // Fallback: If still empty, use body children or entire body
+            if (sectionEls.length === 0) {
+                const directChildren = Array.from(doc.body.children);
+                if (directChildren.length > 0) {
+                    sectionEls = directChildren;
+                } else if (doc.body.innerHTML.trim()) {
+                    const genericSection: VisualSection = {
+                        id: "main-content",
+                        type: "generic",
+                        title: "Overview",
+                        html: doc.body.innerHTML.trim(),
+                        enabled: true,
+                    };
+                    return {
+                        version: "1.0.0",
+                        customCss: customCss.trim() || undefined,
+                        sections: [genericSection],
+                        stats: { sectionCount: 1, imageCount: 0, videoCount: 0, charCount: doc.body.innerHTML.length },
+                    };
+                }
+            }
+
+            // Process each section into a clean VisualSection object
+            sectionEls.forEach((el, index) => {
+                const id = el.id || `section-${index + 1}`;
+                const type = classifySectionType(el);
+
+                // Extract Title
+                const titleEl = el.querySelector("h1, h2, h3, .ndovu-why__title, header h2, .ndovu-scene-copy h2");
+                let title = titleEl ? titleEl.textContent?.trim().replace(/\s+/g, " ") || "" : "";
+                if (!title) {
+                    title = id
+                        .replace(/^pro-/, "")
+                        .replace(/[-_]/g, " ")
+                        .replace(/\b\w/g, (c) => c.toUpperCase());
+                }
+
+                // Extract Eyebrow / Badge
+                const eyebrowEl = el.querySelector(".ndovu-scene-eyebrow, .ndovu-product-badge, .visual-badge");
+                const badge = eyebrowEl ? eyebrowEl.textContent?.trim() : undefined;
+
+                // Extract Description
+                const descEl = el.querySelector(".ndovu-scene-description, .ndovu-section-subheading, .ndovu-scene-caption");
+                const description = descEl ? descEl.textContent?.trim().replace(/\s+/g, " ") : undefined;
+
+                // Extract Metrics & Media
+                const metrics = extractMetrics(el);
+                const media = extractMedia(el);
+
+                totalImages += media.filter((m) => m.type === "image").length;
+                totalVideos += media.filter((m) => m.type === "video").length;
+
+                // Clean authentic HTML of this specific section
+                const sectionHtml = el.outerHTML;
+
+                sections.push({
+                    id,
+                    type,
+                    badge,
+                    title,
+                    description,
+                    html: sectionHtml,
+                    metrics: metrics.length > 0 ? metrics : undefined,
+                    media: media.length > 0 ? media : undefined,
+                    enabled: true,
+                });
+            });
+        } catch (err) {
+            console.error("Error parsing visual description HTML:", err);
+        }
+    } else {
+        // Node / Server-side fallback using regex
+        const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+        let match: RegExpExecArray | null;
+        while ((match = styleRegex.exec(rawHtml)) !== null) {
+            if (match[1]) customCss += `\n${match[1].trim()}\n`;
+        }
+
+        const cleaned = rawHtml
+            .replace(styleRegex, "")
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+            .replace(/data-ndovu-src=(["'])(.*?)\1/gi, 'src="$2" data-ndovu-src="$2"')
+            .replace(/data-ndovu-poster=(["'])(.*?)\1/gi, 'poster="$2" data-ndovu-poster="$2"')
+            .replace(/data-src=(["'])(.*?)\1/gi, 'src="$2" data-src="$2"');
+
+        // Regex split on section or article tags
+        const sectionTagRegex = /<(section|article)\b([\s\S]*?)<\/\1>/gi;
+        let secMatch: RegExpExecArray | null;
+        let idx = 0;
+
+        while ((secMatch = sectionTagRegex.exec(cleaned)) !== null) {
+            idx++;
+            const fullTag = secMatch[0];
+            const idMatch = /id=(["'])(.*?)\1/i.exec(fullTag);
+            const id = idMatch ? idMatch[2] : `section-${idx}`;
+            const titleMatch = /<(h1|h2|h3)[^>]*>([\s\S]*?)<\/\1>/i.exec(fullTag);
+            const title = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, "").trim() : id;
+
+            sections.push({
+                id,
+                type: fullTag.includes("video") ? "scene-video" : fullTag.includes("ndovu-why") ? "highlights-grid" : "generic",
+                title,
+                html: fullTag,
+                enabled: true,
+            });
+        }
+
+        if (sections.length === 0 && cleaned.trim()) {
+            sections.push({
+                id: "main-content",
+                type: "generic",
+                title: "Overview",
+                html: cleaned.trim(),
+                enabled: true,
+            });
+        }
+    }
+
+    return {
+        version: "1.0.0",
+        customCss: customCss.trim() || undefined,
+        sections,
+        stats: {
+            sectionCount: sections.length,
+            imageCount: totalImages,
+            videoCount: totalVideos,
+            charCount: JSON.stringify(sections).length,
+        },
+    };
+}
+
