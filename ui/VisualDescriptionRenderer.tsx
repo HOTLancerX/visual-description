@@ -29,7 +29,48 @@ export interface VisualDescriptionRendererProps {
 /**
  * Ensures all HTML tags are balanced and strictly closed so that unclosed
  * elements cannot leak out during SSR and swallow parent/sibling layout elements (like footer).
+ * Uses zero external dependencies (no jsdom) so Webpack bundles cleanly for client.
  */
+function closeUnclosedTags(html: string): string {
+    if (!html || !html.trim()) return "";
+    const voidTags = new Set([
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr"
+    ]);
+    const stack: string[] = [];
+    const tagRegex = /<\/?([a-zA-Z0-9_-]+)(?:\s+[^>]*?)?(\/?)>/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = tagRegex.exec(html)) !== null) {
+        const full = match[0];
+        const tag = match[1].toLowerCase();
+        const isSelfClosing = match[2];
+
+        if (voidTags.has(tag) || isSelfClosing === "/" || full.endsWith("/>")) {
+            continue;
+        }
+
+        if (full.startsWith("</")) {
+            if (stack.length > 0 && stack[stack.length - 1] === tag) {
+                stack.pop();
+            } else {
+                const idx = stack.lastIndexOf(tag);
+                if (idx !== -1) {
+                    stack.splice(idx, 1);
+                }
+            }
+        } else {
+            stack.push(tag);
+        }
+    }
+
+    let closing = "";
+    while (stack.length > 0) {
+        closing += `</${stack.pop()}>`;
+    }
+    return html + closing;
+}
+
 function balanceHtml(html: string): string {
     if (!html || !html.trim()) return "";
     if (typeof window !== "undefined" && typeof window.DOMParser !== "undefined") {
@@ -40,14 +81,7 @@ function balanceHtml(html: string): string {
             return html;
         }
     }
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { JSDOM } = require("jsdom");
-        const dom = new JSDOM(html);
-        return dom.window.document.body.innerHTML;
-    } catch {
-        return html;
-    }
+    return closeUnclosedTags(html);
 }
 
 export default function VisualDescriptionRenderer({
