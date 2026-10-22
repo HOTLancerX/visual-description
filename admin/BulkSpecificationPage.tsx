@@ -469,7 +469,7 @@ export default function BulkSpecificationPage() {
     const readyToSaveCount = products.filter((p) => p.crawledSpecs).length;
 
     return (
-        <div className="p-6 max-w-7xl mx-auto space-y-6">
+        <div className="container space-y-6">
             {/* ─── Breadcrumb & Title ─── */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
