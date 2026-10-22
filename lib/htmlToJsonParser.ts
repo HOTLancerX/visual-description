@@ -193,7 +193,56 @@ function cleanAndResolveDom(
 }
 
 /**
- * Helper to obtain a Document instance both in browser and Node.js SSR environments.
+ * Balanced section extractor for environments without native DOMParser (SSR / Node.js).
+ * Avoids truncating nested section/article elements and requires ZERO external dependencies.
+ */
+function extractBalancedSections(html: string): { tag: string; fullHtml: string }[] {
+    const results: { tag: string; fullHtml: string }[] = [];
+    const openRegex = /<(section|article)\b[^>]*>/gi;
+    let match: RegExpExecArray | null;
+
+    let cursor = 0;
+    while ((match = openRegex.exec(html)) !== null) {
+        const startIdx = match.index;
+        if (startIdx < cursor) continue;
+
+        const tagName = match[1].toLowerCase();
+        const closeTag = `</${tagName}>`;
+        const openTagPrefix = `<${tagName}`;
+
+        let depth = 1;
+        let pos = startIdx + match[0].length;
+
+        while (depth > 0 && pos < html.length) {
+            const nextOpen = html.toLowerCase().indexOf(openTagPrefix, pos);
+            const nextClose = html.toLowerCase().indexOf(closeTag, pos);
+
+            if (nextClose === -1) break;
+
+            if (nextOpen !== -1 && nextOpen < nextClose) {
+                depth++;
+                pos = nextOpen + openTagPrefix.length;
+            } else {
+                depth--;
+                pos = nextClose + closeTag.length;
+            }
+        }
+
+        if (depth === 0) {
+            results.push({
+                tag: tagName,
+                fullHtml: html.slice(startIdx, pos),
+            });
+            cursor = pos;
+            openRegex.lastIndex = pos;
+        }
+    }
+
+    return results;
+}
+
+/**
+ * Helper to obtain a Document instance in browser environment.
  */
 function parseHtmlDoc(rawHtml: string): Document | null {
     if (typeof window !== "undefined" && typeof window.DOMParser !== "undefined") {
@@ -202,14 +251,6 @@ function parseHtmlDoc(rawHtml: string): Document | null {
         } catch (e) {
             console.error("DOMParser error in parseHtmlDoc:", e);
         }
-    }
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { JSDOM } = require("jsdom");
-        const dom = new JSDOM(rawHtml);
-        return dom.window.document;
-    } catch (e) {
-        console.error("JSDOM error in parseHtmlDoc:", e);
     }
     return null;
 }
@@ -240,25 +281,80 @@ export function parseHtmlToVisualData(
 
     const doc = parseHtmlDoc(rawHtml);
     if (!doc) {
+        // Node.js SSR fallback using balanced tag extraction with ZERO external dependencies
+        const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+        let sMatch: RegExpExecArray | null;
+        while ((sMatch = styleRegex.exec(rawHtml)) !== null) {
+            if (sMatch[1]) customCss += `\n${sMatch[1].trim()}\n`;
+        }
+
+        let cleaned = rawHtml
+            .replace(styleRegex, "")
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+            .replace(/data-ndovu-src=(["'])(.*?)\1/gi, 'src="$2" data-ndovu-src="$2"')
+            .replace(/data-ndovu-poster=(["'])(.*?)\1/gi, 'poster="$2" data-ndovu-poster="$2"')
+            .replace(/data-src=(["'])(.*?)\1/gi, 'src="$2" data-src="$2"');
+
+        // Remove excluded elements by ID or Class
+        excludeIds.forEach((id) => {
+            const clean = id.trim().replace(/^#/, "");
+            if (!clean) return;
+            const r = new RegExp(`<(section|article|div)[^>]*?\\bid=["']?${clean}["']?[^>]*>[\\s\\S]*?<\\/\\1>`, "gi");
+            cleaned = cleaned.replace(r, "");
+        });
+        excludeClasses.forEach((cls) => {
+            const clean = cls.trim().replace(/^\./, "");
+            if (!clean) return;
+            const r = new RegExp(`<(section|article|div)[^>]*?\\bclass=["'][^"']*?${clean}[^"']*?["'][^>]*>[\\s\\S]*?<\\/\\1>`, "gi");
+            cleaned = cleaned.replace(r, "");
+        });
+
+        const balancedSections = extractBalancedSections(cleaned);
+        balancedSections.forEach((sec, idx) => {
+            const fullTag = sec.fullHtml;
+            const idMatch = /id=(["'])(.*?)\1/i.exec(fullTag);
+            const id = idMatch ? idMatch[2] : `section-${idx + 1}`;
+            const sId = id.toLowerCase();
+            const sClass = (fullTag.match(/class=(["'])(.*?)\1/i)?.[2] || "").toLowerCase();
+
+            if (excludeIds.some((x) => x && sId.includes(x.trim().toLowerCase().replace(/^#/, "")))) {
+                return;
+            }
+            if (excludeClasses.some((x) => x && sClass.includes(x.trim().toLowerCase().replace(/^\./, "")))) {
+                return;
+            }
+
+            const titleMatch = /<(h1|h2|h3)[^>]*>([\s\S]*?)<\/\1>/i.exec(fullTag);
+            const title = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, "").trim() : id;
+
+            sections.push({
+                id,
+                type: fullTag.includes("video") ? "scene-video" : fullTag.includes("ndovu-why") ? "highlights-grid" : "generic",
+                title,
+                html: fullTag,
+                enabled: true,
+            });
+        });
+
+        if (sections.length === 0 && cleaned.trim()) {
+            sections.push({
+                id: "main-content",
+                type: "generic",
+                title: "Overview",
+                html: cleaned.trim(),
+                enabled: true,
+            });
+        }
+
         return {
             version: "1.0.0",
             customCss: customCss.trim() || undefined,
-            sections: rawHtml.trim()
-                ? [
-                      {
-                          id: "main-content",
-                          type: "generic",
-                          title: "Overview",
-                          html: rawHtml.trim(),
-                          enabled: true,
-                      },
-                  ]
-                : [],
+            sections,
             stats: {
-                sectionCount: rawHtml.trim() ? 1 : 0,
-                imageCount: 0,
-                videoCount: 0,
-                charCount: rawHtml.length,
+                sectionCount: sections.length,
+                imageCount: totalImages,
+                videoCount: totalVideos,
+                charCount: JSON.stringify(sections).length,
             },
         };
     }

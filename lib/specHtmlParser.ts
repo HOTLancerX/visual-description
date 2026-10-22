@@ -57,14 +57,6 @@ function parseHtmlDoc(rawHtml: string): Document | null {
             console.error("DOMParser error in specHtmlParser:", e);
         }
     }
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { JSDOM } = require("jsdom");
-        const dom = new JSDOM(rawHtml);
-        return dom.window.document;
-    } catch (e) {
-        console.error("JSDOM error in specHtmlParser:", e);
-    }
     return null;
 }
 
@@ -81,7 +73,57 @@ export function parseHtmlToSpecifications(
 
     const boxes: SpecificationBox[] = [];
     const doc = parseHtmlDoc(rawHtml);
-    if (!doc) return [];
+
+    if (!doc) {
+        // Zero-dependency Node.js fallback
+        let cleaned = rawHtml;
+        cleaned = cleaned
+            .replace(/<nav\b[^>]*class=["'][^"']*ndovu-dedicated-links[^"']*["'][^>]*>[\s\S]*?<\/nav>/gi, "")
+            .replace(/<nav\b[^>]*aria-label=["'][^"']*Technical comparisons[^"']*["'][^>]*>[\s\S]*?<\/nav>/gi, "")
+            .replace(/<h2\b[^>]*id=["']ndovu-specs-heading["'][^>]*>[\s\S]*?<\/h2>/gi, "")
+            .replace(/<p\b[^>]*class=["'][^"']*ndovu-section-subheading[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "")
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+            .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, "");
+
+        // Match section.ndovu-pdp-card
+        const cardRegex = /<section\b[^>]*class=["'][^"']*ndovu-pdp-card[^"']*["'][^>]*>([\s\S]*?)<\/section>/gi;
+        let cardMatch: RegExpExecArray | null;
+
+        while ((cardMatch = cardRegex.exec(cleaned)) !== null) {
+            const cardContent = cardMatch[1];
+            const hMatch = /<h3[^>]*>[\s\S]*?<span>([\s\S]*?)<\/span>/i.exec(cardContent) ||
+                           /<h3[^>]*>([\s\S]*?)<\/h3>/i.exec(cardContent);
+            const boxTitle = cleanText(hMatch ? hMatch[1].replace(/<[^>]+>/g, "") : "");
+
+            const fields: SpecificationField[] = [];
+            const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+            let trMatch: RegExpExecArray | null;
+
+            while ((trMatch = trRegex.exec(cardContent)) !== null) {
+                const trContent = trMatch[1];
+                const thMatch = /<th[^>]*>([\s\S]*?)<\/th>/i.exec(trContent);
+                const tdMatch = /<span\b[^>]*class=["'][^"']*ndovu-pdp-value[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(trContent) ||
+                                /<td[^>]*>([\s\S]*?)<\/td>/i.exec(trContent);
+
+                if (thMatch && tdMatch) {
+                    const key = cleanText(thMatch[1].replace(/<[^>]+>/g, ""));
+                    const val = cleanText(tdMatch[1].replace(/<[^>]+>/g, ""));
+                    if (key && val) {
+                        fields.push({ title: key, description: val });
+                    }
+                }
+            }
+
+            if (boxTitle || fields.length > 0) {
+                boxes.push({
+                    title: boxTitle || `Section ${boxes.length + 1}`,
+                    fields,
+                });
+            }
+        }
+
+        return boxes;
+    }
 
     try {
         // 1. Remove unwanted elements
