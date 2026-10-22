@@ -193,6 +193,28 @@ function cleanAndResolveDom(
 }
 
 /**
+ * Helper to obtain a Document instance both in browser and Node.js SSR environments.
+ */
+function parseHtmlDoc(rawHtml: string): Document | null {
+    if (typeof window !== "undefined" && typeof window.DOMParser !== "undefined") {
+        try {
+            return new DOMParser().parseFromString(rawHtml, "text/html");
+        } catch (e) {
+            console.error("DOMParser error in parseHtmlDoc:", e);
+        }
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { JSDOM } = require("jsdom");
+        const dom = new JSDOM(rawHtml);
+        return dom.window.document;
+    } catch (e) {
+        console.error("JSDOM error in parseHtmlDoc:", e);
+    }
+    return null;
+}
+
+/**
  * Parses raw HTML string into structured VisualDescriptionData JSON.
  * Bypasses / excludes sections or elements matching excludeIds & excludeClasses.
  */
@@ -216,192 +238,140 @@ export function parseHtmlToVisualData(
     let totalImages = 0;
     let totalVideos = 0;
 
-    // Browser environment with DOMParser
-    if (typeof window !== "undefined" && typeof window.DOMParser !== "undefined") {
-        try {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(rawHtml, "text/html");
+    const doc = parseHtmlDoc(rawHtml);
+    if (!doc) {
+        return {
+            version: "1.0.0",
+            customCss: customCss.trim() || undefined,
+            sections: rawHtml.trim()
+                ? [
+                      {
+                          id: "main-content",
+                          type: "generic",
+                          title: "Overview",
+                          html: rawHtml.trim(),
+                          enabled: true,
+                      },
+                  ]
+                : [],
+            stats: {
+                sectionCount: rawHtml.trim() ? 1 : 0,
+                imageCount: 0,
+                videoCount: 0,
+                charCount: rawHtml.length,
+            },
+        };
+    }
 
-            // Extract all <style> blocks
-            Array.from(doc.querySelectorAll("style")).forEach((styleEl) => {
-                const cssText = styleEl.textContent || "";
-                if (cssText.trim()) {
-                    customCss += `\n${cssText.trim()}\n`;
-                }
-                styleEl.remove();
-            });
-
-            // Clean & resolve media & remove excluded elements
-            cleanAndResolveDom(doc, excludeIds, excludeClasses);
-
-            // Find all candidate section elements
-            let sectionEls = Array.from(
-                doc.querySelectorAll(".ndovu-why, article.ndovu-scene, .ndovu-catalog-compare, .xiaomi-story")
-            );
-
-            // If none of those specialized classes were found, grab top-level sections / articles
-            if (sectionEls.length === 0) {
-                const rootChildren = Array.from(doc.body.children);
-                if (rootChildren.length === 1 && rootChildren[0].classList.contains("xiaomi-ux3b2-components")) {
-                    sectionEls = Array.from(rootChildren[0].querySelectorAll("section, article"));
-                } else {
-                    sectionEls = Array.from(doc.querySelectorAll("section, article"));
-                }
+    try {
+        // Extract all <style> blocks
+        Array.from(doc.querySelectorAll("style")).forEach((styleEl) => {
+            const cssText = styleEl.textContent || "";
+            if (cssText.trim()) {
+                customCss += `\n${cssText.trim()}\n`;
             }
+            styleEl.remove();
+        });
 
-            // Fallback: If still empty, use body children or entire body
-            if (sectionEls.length === 0) {
-                const directChildren = Array.from(doc.body.children);
-                if (directChildren.length > 0) {
-                    sectionEls = directChildren;
-                } else if (doc.body.innerHTML.trim()) {
-                    const genericSection: VisualSection = {
-                        id: "main-content",
-                        type: "generic",
-                        title: "Overview",
-                        html: doc.body.innerHTML.trim(),
-                        enabled: true,
-                    };
-                    return {
-                        version: "1.0.0",
-                        customCss: customCss.trim() || undefined,
-                        sections: [genericSection],
-                        stats: { sectionCount: 1, imageCount: 0, videoCount: 0, charCount: doc.body.innerHTML.length },
-                    };
-                }
+        // Clean & resolve media & remove excluded elements
+        cleanAndResolveDom(doc, excludeIds, excludeClasses);
+
+        // Find all candidate section elements
+        let sectionEls = Array.from(
+            doc.querySelectorAll(".ndovu-why, article.ndovu-scene, .ndovu-catalog-compare, .xiaomi-story")
+        );
+
+        // If none of those specialized classes were found, grab top-level sections / articles
+        if (sectionEls.length === 0) {
+            const rootChildren = Array.from(doc.body.children);
+            if (rootChildren.length === 1 && rootChildren[0].classList.contains("xiaomi-ux3b2-components")) {
+                sectionEls = Array.from(rootChildren[0].querySelectorAll("section, article"));
+            } else {
+                sectionEls = Array.from(doc.querySelectorAll("section, article"));
             }
+        }
 
-            // Process each section into a clean VisualSection object
-            sectionEls.forEach((el, index) => {
-                const id = el.id || `section-${index + 1}`;
-                const sId = (el.id || "").toLowerCase();
-                const sClass = (el.className || "").toLowerCase();
-
-                // Skip / Bypass if section matches excluded ID
-                if (excludeIds.some((x) => x && sId.includes(x.trim().toLowerCase().replace(/^#/, "")))) {
-                    return;
-                }
-                // Skip / Bypass if section matches excluded Class
-                if (excludeClasses.some((x) => x && sClass.includes(x.trim().toLowerCase().replace(/^\./, "")))) {
-                    return;
-                }
-
-                const type = classifySectionType(el);
-
-                // Extract Title
-                const titleEl = el.querySelector("h1, h2, h3, .ndovu-why__title, header h2, .ndovu-scene-copy h2");
-                let title = titleEl ? titleEl.textContent?.trim().replace(/\s+/g, " ") || "" : "";
-                if (!title) {
-                    title = id
-                        .replace(/^pro-/, "")
-                        .replace(/[-_]/g, " ")
-                        .replace(/\b\w/g, (c) => c.toUpperCase());
-                }
-
-                // Extract Eyebrow / Badge
-                const eyebrowEl = el.querySelector(".ndovu-scene-eyebrow, .ndovu-product-badge, .visual-badge");
-                const badge = eyebrowEl ? eyebrowEl.textContent?.trim() : undefined;
-
-                // Extract Description
-                const descEl = el.querySelector(".ndovu-scene-description, .ndovu-section-subheading, .ndovu-scene-caption");
-                const description = descEl ? descEl.textContent?.trim().replace(/\s+/g, " ") : undefined;
-
-                // Extract Metrics & Media
-                const metrics = extractMetrics(el);
-                const media = extractMedia(el);
-
-                totalImages += media.filter((m) => m.type === "image").length;
-                totalVideos += media.filter((m) => m.type === "video").length;
-
-                // Clean authentic HTML of this specific section
-                const sectionHtml = el.outerHTML;
-
-                sections.push({
-                    id,
-                    type,
-                    badge,
-                    title,
-                    description,
-                    html: sectionHtml,
-                    metrics: metrics.length > 0 ? metrics : undefined,
-                    media: media.length > 0 ? media : undefined,
+        // Fallback: If still empty, use body children or entire body
+        if (sectionEls.length === 0) {
+            const directChildren = Array.from(doc.body.children);
+            if (directChildren.length > 0) {
+                sectionEls = directChildren;
+            } else if (doc.body.innerHTML.trim()) {
+                const genericSection: VisualSection = {
+                    id: "main-content",
+                    type: "generic",
+                    title: "Overview",
+                    html: doc.body.innerHTML.trim(),
                     enabled: true,
-                });
-            });
-        } catch (err) {
-            console.error("Error parsing visual description HTML:", err);
-        }
-    } else {
-        // Node / Server-side fallback using regex
-        const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi;
-        let match: RegExpExecArray | null;
-        while ((match = styleRegex.exec(rawHtml)) !== null) {
-            if (match[1]) customCss += `\n${match[1].trim()}\n`;
+                };
+                return {
+                    version: "1.0.0",
+                    customCss: customCss.trim() || undefined,
+                    sections: [genericSection],
+                    stats: { sectionCount: 1, imageCount: 0, videoCount: 0, charCount: doc.body.innerHTML.length },
+                };
+            }
         }
 
-        let cleaned = rawHtml
-            .replace(styleRegex, "")
-            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
-            .replace(/data-ndovu-src=(["'])(.*?)\1/gi, 'src="$2" data-ndovu-src="$2"')
-            .replace(/data-ndovu-poster=(["'])(.*?)\1/gi, 'poster="$2" data-ndovu-poster="$2"')
-            .replace(/data-src=(["'])(.*?)\1/gi, 'src="$2" data-src="$2"');
+        // Process each section into a clean VisualSection object
+        sectionEls.forEach((el, index) => {
+            const id = el.id || `section-${index + 1}`;
+            const sId = (el.id || "").toLowerCase();
+            const sClass = (el.className || "").toLowerCase();
 
-        // Remove excluded elements by ID or Class
-        excludeIds.forEach((id) => {
-            const clean = id.trim().replace(/^#/, "");
-            if (!clean) return;
-            const r = new RegExp(`<(section|article|div)[^>]*?\\bid=["']?${clean}["']?[^>]*>[\\s\\S]*?<\\/\\1>`, "gi");
-            cleaned = cleaned.replace(r, "");
-        });
-        excludeClasses.forEach((cls) => {
-            const clean = cls.trim().replace(/^\./, "");
-            if (!clean) return;
-            const r = new RegExp(`<(section|article|div)[^>]*?\\bclass=["'][^"']*?${clean}[^"']*?["'][^>]*>[\\s\\S]*?<\\/\\1>`, "gi");
-            cleaned = cleaned.replace(r, "");
-        });
-
-        // Regex split on section or article tags
-        const sectionTagRegex = /<(section|article)\b([\s\S]*?)<\/\1>/gi;
-        let secMatch: RegExpExecArray | null;
-        let idx = 0;
-
-        while ((secMatch = sectionTagRegex.exec(cleaned)) !== null) {
-            idx++;
-            const fullTag = secMatch[0];
-            const idMatch = /id=(["'])(.*?)\1/i.exec(fullTag);
-            const id = idMatch ? idMatch[2] : `section-${idx}`;
-            const sId = id.toLowerCase();
-            const sClass = (fullTag.match(/class=(["'])(.*?)\1/i)?.[2] || "").toLowerCase();
-
-            // Skip / Bypass if section matches excluded ID or Class
+            // Skip / Bypass if section matches excluded ID
             if (excludeIds.some((x) => x && sId.includes(x.trim().toLowerCase().replace(/^#/, "")))) {
-                continue;
+                return;
             }
+            // Skip / Bypass if section matches excluded Class
             if (excludeClasses.some((x) => x && sClass.includes(x.trim().toLowerCase().replace(/^\./, "")))) {
-                continue;
+                return;
             }
 
-            const titleMatch = /<(h1|h2|h3)[^>]*>([\s\S]*?)<\/\1>/i.exec(fullTag);
-            const title = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, "").trim() : id;
+            const type = classifySectionType(el);
+
+            // Extract Title
+            const titleEl = el.querySelector("h1, h2, h3, .ndovu-why__title, header h2, .ndovu-scene-copy h2");
+            let title = titleEl ? titleEl.textContent?.trim().replace(/\s+/g, " ") || "" : "";
+            if (!title) {
+                title = id
+                    .replace(/^pro-/, "")
+                    .replace(/[-_]/g, " ")
+                    .replace(/\b\w/g, (c) => c.toUpperCase());
+            }
+
+            // Extract Eyebrow / Badge
+            const eyebrowEl = el.querySelector(".ndovu-scene-eyebrow, .ndovu-product-badge, .visual-badge");
+            const badge = eyebrowEl ? eyebrowEl.textContent?.trim() : undefined;
+
+            // Extract Description
+            const descEl = el.querySelector(".ndovu-scene-description, .ndovu-section-subheading, .ndovu-scene-caption");
+            const description = descEl ? descEl.textContent?.trim().replace(/\s+/g, " ") : undefined;
+
+            // Extract Metrics & Media
+            const metrics = extractMetrics(el);
+            const media = extractMedia(el);
+
+            totalImages += media.filter((m) => m.type === "image").length;
+            totalVideos += media.filter((m) => m.type === "video").length;
+
+            // Clean authentic HTML of this specific section
+            const sectionHtml = el.outerHTML;
 
             sections.push({
                 id,
-                type: fullTag.includes("video") ? "scene-video" : fullTag.includes("ndovu-why") ? "highlights-grid" : "generic",
+                type,
+                badge,
                 title,
-                html: fullTag,
+                description,
+                html: sectionHtml,
+                metrics: metrics.length > 0 ? metrics : undefined,
+                media: media.length > 0 ? media : undefined,
                 enabled: true,
             });
-        }
-
-        if (sections.length === 0 && cleaned.trim()) {
-            sections.push({
-                id: "main-content",
-                type: "generic",
-                title: "Overview",
-                html: cleaned.trim(),
-                enabled: true,
-            });
-        }
+        });
+    } catch (err) {
+        console.error("Error parsing visual description HTML:", err);
     }
 
     return {

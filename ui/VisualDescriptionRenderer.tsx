@@ -26,6 +26,30 @@ export interface VisualDescriptionRendererProps {
     isInteractivePreview?: boolean;
 }
 
+/**
+ * Ensures all HTML tags are balanced and strictly closed so that unclosed
+ * elements cannot leak out during SSR and swallow parent/sibling layout elements (like footer).
+ */
+function balanceHtml(html: string): string {
+    if (!html || !html.trim()) return "";
+    if (typeof window !== "undefined" && typeof window.DOMParser !== "undefined") {
+        try {
+            const doc = new DOMParser().parseFromString(html, "text/html");
+            return doc.body.innerHTML;
+        } catch {
+            return html;
+        }
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { JSDOM } = require("jsdom");
+        const dom = new JSDOM(html);
+        return dom.window.document.body.innerHTML;
+    } catch {
+        return html;
+    }
+}
+
 export default function VisualDescriptionRenderer({
     data,
     className = "",
@@ -87,15 +111,15 @@ export default function VisualDescriptionRenderer({
                 }
             });
 
-            return { rawHtml: compiledHtml.trim(), customCss: extractedCss };
+            return { rawHtml: balanceHtml(compiledHtml.trim()), customCss: extractedCss };
         }
 
         // Legacy fallback
         if ((parsedObj as any).rawHtml) {
-            return { rawHtml: (parsedObj as any).rawHtml, customCss: extractedCss };
+            return { rawHtml: balanceHtml((parsedObj as any).rawHtml), customCss: extractedCss };
         }
         if ((parsedObj as any).rawHtmlBackup) {
-            return { rawHtml: (parsedObj as any).rawHtmlBackup, customCss: extractedCss };
+            return { rawHtml: balanceHtml((parsedObj as any).rawHtmlBackup), customCss: extractedCss };
         }
 
         return { rawHtml: "", customCss: extractedCss };
@@ -724,10 +748,12 @@ export default function VisualDescriptionRenderer({
         <div
             ref={containerRef}
             className={`${className}`}
+            suppressHydrationWarning
         >
             {/* Render 100% Authentic Original HTML */}
             <div
                 dangerouslySetInnerHTML={{ __html: rawHtml }}
+                suppressHydrationWarning
             />
         </div>
     );
