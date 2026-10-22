@@ -18,6 +18,7 @@ import VisualDescriptionRenderer from "./ui/VisualDescriptionRenderer";
 import VisualPreviewModal from "./ui/VisualPreviewModal";
 import VisualDescriptionSettingsPage from "./settings/VisualDescriptionSettingsPage";
 import BulkVisualDescriptionPage from "./admin/BulkVisualDescriptionPage";
+import BulkSpecificationPage from "./admin/BulkSpecificationPage";
 import { XIAOMI_MASTER_PREBUILT_CSS } from "./presets/xiaomiPrebuiltCss";
 
 export {
@@ -26,9 +27,11 @@ export {
     VisualPreviewModal,
     VisualDescriptionSettingsPage,
     BulkVisualDescriptionPage,
+    BulkSpecificationPage,
 };
 export * from "./types";
 export * from "./lib/htmlToJsonParser";
+export * from "./lib/specHtmlParser";
 
 export const PLUGINS: PluginMeta = {
     nx: "visual-description",
@@ -75,18 +78,26 @@ export function register(): void {
         [
             {
                 key: "visual-description-bulk",
-                label: "Bulk Visual Description",
+                label: "Visual Description",
                 icon: "solar:magic-stick-3-bold",
                 slug: "visual-description/bulk",
-                parent: "product",
-                position: 6.7,
+                parent: "",
+                position: 55,
+            },
+            {
+                key: "visual-description-specs-bulk",
+                label: "Bulk Specifications",
+                icon: "solar:checklist-minimalistic-bold",
+                slug: "visual-description/bulk-specs",
+                parent: "visual-description-bulk",
+                position: 6.8,
             },
             {
                 key: "visual-description",
                 label: "Visual Description CSS",
                 icon: "solar:layers-minimalistic-bold",
                 slug: "visual-description",
-                parent: "product",
+                parent: "visual-description-bulk",
                 position: 8.5,
             },
         ],
@@ -114,12 +125,28 @@ export function register(): void {
                 path: BulkVisualDescriptionPage,
             },
             {
+                key: "visual-description/bulk-specs",
+                label: "Bulk Product Specifications",
+                type: "visual-description",
+                style: "left",
+                position: 21,
+                path: BulkSpecificationPage,
+            },
+            {
                 key: "product/visual-descriptions",
                 label: "Bulk Visual Description",
                 type: "product",
                 style: "left",
                 position: 27,
                 path: BulkVisualDescriptionPage,
+            },
+            {
+                key: "product/specifications-bulk",
+                label: "Bulk Product Specifications",
+                type: "product",
+                style: "left",
+                position: 28,
+                path: BulkSpecificationPage,
             },
         ],
         activeNx
