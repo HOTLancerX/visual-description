@@ -127,13 +127,35 @@ function extractMedia(el: Element): VisualSectionMediaItem[] {
 }
 
 /**
- * Cleans and resolves media attributes in a DOM tree
+ * Cleans and resolves media attributes in a DOM tree, and removes excluded elements
  */
-function cleanAndResolveDom(doc: Document) {
+function cleanAndResolveDom(
+    doc: Document,
+    excludeIds: string[] = ["product-comparison", "specs"],
+    excludeClasses: string[] = ["ndovu-catalog-compare", "ndovu-spec-tabs", "ndovu-spec-surface", "ndovu-pdp-tables"]
+) {
     // 1. Remove script tags for safety
     Array.from(doc.querySelectorAll("script")).forEach((s) => s.remove());
 
-    // 2. Resolve lazy images
+    // 2. Remove bypassed / excluded elements by ID
+    excludeIds.forEach((id) => {
+        const clean = id.trim().replace(/^#/, "");
+        if (!clean) return;
+        try {
+            Array.from(doc.querySelectorAll(`#${clean}, [id="${clean}"]`)).forEach((el) => el.remove());
+        } catch {}
+    });
+
+    // 3. Remove bypassed / excluded elements by Class
+    excludeClasses.forEach((cls) => {
+        const clean = cls.trim().replace(/^\./, "");
+        if (!clean) return;
+        try {
+            Array.from(doc.querySelectorAll(`.${clean}, [class*="${clean}"]`)).forEach((el) => el.remove());
+        } catch {}
+    });
+
+    // 4. Resolve lazy images
     Array.from(doc.querySelectorAll("img")).forEach((img) => {
         const lazySrc =
             img.getAttribute("data-src") ||
@@ -148,7 +170,7 @@ function cleanAndResolveDom(doc: Document) {
         }
     });
 
-    // 3. Resolve lazy videos
+    // 5. Resolve lazy videos
     Array.from(doc.querySelectorAll("video")).forEach((video) => {
         const poster =
             video.getAttribute("data-ndovu-poster") ||
@@ -171,18 +193,25 @@ function cleanAndResolveDom(doc: Document) {
 }
 
 /**
- * Parses raw HTML string into structured VisualDescriptionData JSON
+ * Parses raw HTML string into structured VisualDescriptionData JSON.
+ * Bypasses / excludes sections or elements matching excludeIds & excludeClasses.
  */
-export function parseHtmlToVisualData(rawHtml: string): VisualDescriptionData {
+export function parseHtmlToVisualData(
+    rawHtml: string,
+    extraCss?: string,
+    excludeIds: string[] = ["product-comparison", "specs"],
+    excludeClasses: string[] = ["ndovu-catalog-compare", "ndovu-spec-tabs", "ndovu-spec-surface", "ndovu-pdp-tables"]
+): VisualDescriptionData {
     if (!rawHtml || typeof rawHtml !== "string" || !rawHtml.trim()) {
         return {
             version: "1.0.0",
+            customCss: extraCss?.trim() || undefined,
             sections: [],
             stats: { sectionCount: 0, imageCount: 0, videoCount: 0, charCount: 0 },
         };
     }
 
-    let customCss = "";
+    let customCss = extraCss ? `${extraCss.trim()}\n` : "";
     const sections: VisualSection[] = [];
     let totalImages = 0;
     let totalVideos = 0;
@@ -202,8 +231,8 @@ export function parseHtmlToVisualData(rawHtml: string): VisualDescriptionData {
                 styleEl.remove();
             });
 
-            // Clean & resolve media
-            cleanAndResolveDom(doc);
+            // Clean & resolve media & remove excluded elements
+            cleanAndResolveDom(doc, excludeIds, excludeClasses);
 
             // Find all candidate section elements
             let sectionEls = Array.from(
@@ -245,6 +274,18 @@ export function parseHtmlToVisualData(rawHtml: string): VisualDescriptionData {
             // Process each section into a clean VisualSection object
             sectionEls.forEach((el, index) => {
                 const id = el.id || `section-${index + 1}`;
+                const sId = (el.id || "").toLowerCase();
+                const sClass = (el.className || "").toLowerCase();
+
+                // Skip / Bypass if section matches excluded ID
+                if (excludeIds.some((x) => x && sId.includes(x.trim().toLowerCase().replace(/^#/, "")))) {
+                    return;
+                }
+                // Skip / Bypass if section matches excluded Class
+                if (excludeClasses.some((x) => x && sClass.includes(x.trim().toLowerCase().replace(/^\./, "")))) {
+                    return;
+                }
+
                 const type = classifySectionType(el);
 
                 // Extract Title
@@ -298,12 +339,26 @@ export function parseHtmlToVisualData(rawHtml: string): VisualDescriptionData {
             if (match[1]) customCss += `\n${match[1].trim()}\n`;
         }
 
-        const cleaned = rawHtml
+        let cleaned = rawHtml
             .replace(styleRegex, "")
             .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
             .replace(/data-ndovu-src=(["'])(.*?)\1/gi, 'src="$2" data-ndovu-src="$2"')
             .replace(/data-ndovu-poster=(["'])(.*?)\1/gi, 'poster="$2" data-ndovu-poster="$2"')
             .replace(/data-src=(["'])(.*?)\1/gi, 'src="$2" data-src="$2"');
+
+        // Remove excluded elements by ID or Class
+        excludeIds.forEach((id) => {
+            const clean = id.trim().replace(/^#/, "");
+            if (!clean) return;
+            const r = new RegExp(`<(section|article|div)[^>]*?\\bid=["']?${clean}["']?[^>]*>[\\s\\S]*?<\\/\\1>`, "gi");
+            cleaned = cleaned.replace(r, "");
+        });
+        excludeClasses.forEach((cls) => {
+            const clean = cls.trim().replace(/^\./, "");
+            if (!clean) return;
+            const r = new RegExp(`<(section|article|div)[^>]*?\\bclass=["'][^"']*?${clean}[^"']*?["'][^>]*>[\\s\\S]*?<\\/\\1>`, "gi");
+            cleaned = cleaned.replace(r, "");
+        });
 
         // Regex split on section or article tags
         const sectionTagRegex = /<(section|article)\b([\s\S]*?)<\/\1>/gi;
@@ -315,6 +370,17 @@ export function parseHtmlToVisualData(rawHtml: string): VisualDescriptionData {
             const fullTag = secMatch[0];
             const idMatch = /id=(["'])(.*?)\1/i.exec(fullTag);
             const id = idMatch ? idMatch[2] : `section-${idx}`;
+            const sId = id.toLowerCase();
+            const sClass = (fullTag.match(/class=(["'])(.*?)\1/i)?.[2] || "").toLowerCase();
+
+            // Skip / Bypass if section matches excluded ID or Class
+            if (excludeIds.some((x) => x && sId.includes(x.trim().toLowerCase().replace(/^#/, "")))) {
+                continue;
+            }
+            if (excludeClasses.some((x) => x && sClass.includes(x.trim().toLowerCase().replace(/^\./, "")))) {
+                continue;
+            }
+
             const titleMatch = /<(h1|h2|h3)[^>]*>([\s\S]*?)<\/\1>/i.exec(fullTag);
             const title = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, "").trim() : id;
 

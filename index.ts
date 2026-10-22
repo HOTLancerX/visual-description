@@ -17,9 +17,16 @@ import VisualDescriptionField from "./ui/VisualDescriptionField";
 import VisualDescriptionRenderer from "./ui/VisualDescriptionRenderer";
 import VisualPreviewModal from "./ui/VisualPreviewModal";
 import VisualDescriptionSettingsPage from "./settings/VisualDescriptionSettingsPage";
+import BulkVisualDescriptionPage from "./admin/BulkVisualDescriptionPage";
 import { XIAOMI_MASTER_PREBUILT_CSS } from "./presets/xiaomiPrebuiltCss";
 
-export { VisualDescriptionField, VisualDescriptionRenderer, VisualPreviewModal, VisualDescriptionSettingsPage };
+export {
+    VisualDescriptionField,
+    VisualDescriptionRenderer,
+    VisualPreviewModal,
+    VisualDescriptionSettingsPage,
+    BulkVisualDescriptionPage,
+};
 export * from "./types";
 export * from "./lib/htmlToJsonParser";
 
@@ -62,13 +69,21 @@ export function register(): void {
         activeNx
     );
 
-    // ─── 2. Admin Navigation Item ─────────────────────────────────────────────
+    // ─── 2. Admin Navigation Items ────────────────────────────────────────────
     addHook(
         "admin.nav",
         [
             {
+                key: "visual-description-bulk",
+                label: "Bulk Visual Description",
+                icon: "solar:magic-stick-3-bold",
+                slug: "visual-description/bulk",
+                parent: "product",
+                position: 6.7,
+            },
+            {
                 key: "visual-description",
-                label: "Visual Description",
+                label: "Visual Description CSS",
                 icon: "solar:layers-minimalistic-bold",
                 slug: "visual-description",
                 parent: "product",
@@ -78,7 +93,7 @@ export function register(): void {
         activeNx
     );
 
-    // ─── 3. Admin Dynamic Page (/admin/visual-description) ────────────────────
+    // ─── 3. Admin Dynamic Pages (/admin/visual-description/bulk & /admin/visual-description) ───
     addHook(
         "admin.pages",
         [
@@ -89,6 +104,22 @@ export function register(): void {
                 style: "left",
                 position: 10,
                 path: VisualDescriptionSettingsPage,
+            },
+            {
+                key: "visual-description/bulk",
+                label: "Bulk Visual Description",
+                type: "visual-description",
+                style: "left",
+                position: 20,
+                path: BulkVisualDescriptionPage,
+            },
+            {
+                key: "product/visual-descriptions",
+                label: "Bulk Visual Description",
+                type: "product",
+                style: "left",
+                position: 27,
+                path: BulkVisualDescriptionPage,
             },
         ],
         activeNx
