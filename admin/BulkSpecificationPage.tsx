@@ -4,6 +4,11 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { Icon } from "@iconify/react";
 import Link from "next/link";
 import type { SpecificationBox } from "../lib/specHtmlParser";
+import {
+    saveSitemapMatchesToCache,
+    getSitemapMatchesFromCache,
+    clearSitemapMatchesCache,
+} from "../lib/specStorage";
 
 export interface SpecProductRow {
     id: string;
@@ -26,6 +31,7 @@ export interface SpecProductRow {
     crawledSpecs?: SpecificationBox[] | null;
     crawlError?: string;
     isSaving?: boolean;
+    justSaved?: boolean;
 }
 
 interface PaginationInfo {
@@ -39,12 +45,15 @@ interface PaginationInfo {
 }
 
 export default function BulkSpecificationPage() {
+    // ─── Primary Tabs: Missing Specs vs Completed vs All ───
+    const [mainTab, setMainTab] = useState<"missing" | "completed" | "all">("missing");
+    const [subFilter, setSubFilter] = useState<"all" | "exact_matched" | "matched" | "unmatched" | "crawled">("all");
+
     // ─── Products & Listing State ───
     const [products, setProducts] = useState<SpecProductRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [page, setPage] = useState(1);
     const [limit, setLimit] = useState(100);
-    const [filter, setFilter] = useState<"all" | "missing" | "completed" | "matched" | "exact_matched" | "crawled">("all");
     const [search, setSearch] = useState("");
     const [category, setCategory] = useState("");
     const [categories, setCategories] = useState<{ _id: string; title: string }[]>([]);
@@ -60,12 +69,14 @@ export default function BulkSpecificationPage() {
 
     // ─── Sitemap & Crawler Configuration ───
     const [sitemapInput, setSitemapInput] = useState(
-        "https://exelicgadgets.co.ke/product-sitemap.xml"
+        `https://exelicgadgets.co.ke/product-sitemap.xml
+https://exelicgadgets.co.ke/product-sitemap2.xml`
     );
     const [targetClass, setTargetClass] = useState("ndovu-scene-inner");
     const [excludeSelectors, setExcludeSelectors] = useState(
         "nav.ndovu-dedicated-links, #ndovu-specs-heading, .ndovu-section-subheading"
     );
+    const [sitemapScope, setSitemapScope] = useState<"missing" | "all">("missing");
     const [isFetchingSitemap, setIsFetchingSitemap] = useState(false);
     const [sitemapStats, setSitemapStats] = useState<{
         processed: number;
@@ -77,6 +88,46 @@ export default function BulkSpecificationPage() {
     const [sitemapMatches, setSitemapMatches] = useState<
         Record<string, { url: string; imageUrl?: string; slug: string; confidence: "exact" | "partial" | "manual" }>
     >({});
+    // Ref mirror to avoid stale closures during async fetch calls
+    const sitemapMatchesRef = useRef<
+        Record<string, { url: string; imageUrl?: string; slug: string; confidence: "exact" | "partial" | "manual" }>
+    >({});
+
+    // Load saved sitemap matches from IndexedDB (avoids localStorage 5MB quota errors)
+    useEffect(() => {
+        // Clean up any legacy localStorage entry to free browser storage
+        try {
+            if (typeof window !== "undefined") {
+                localStorage.removeItem("cms_spec_sitemap_matches");
+            }
+        } catch {}
+
+        getSitemapMatchesFromCache().then((cached) => {
+            if (cached && Object.keys(cached).length > 0) {
+                sitemapMatchesRef.current = cached;
+                setSitemapMatches(cached);
+                setSitemapStats({
+                    processed: 2,
+                    found: Object.keys(cached).length,
+                    matched: Object.keys(cached).length,
+                });
+                setProducts((prev) =>
+                    prev.map((p) => {
+                        const m = cached[p.slug];
+                        if (m) {
+                            return {
+                                ...p,
+                                matchedUrl: m.url,
+                                matchedImage: m.imageUrl,
+                                matchConfidence: m.confidence,
+                            };
+                        }
+                        return p;
+                    })
+                );
+            }
+        });
+    }, []);
 
     // ─── Batch Crawl & Save States ───
     const [isBatchCrawling, setIsBatchCrawling] = useState(false);
@@ -121,14 +172,19 @@ export default function BulkSpecificationPage() {
 
     // ─── Fetch Products List ───
     const fetchProducts = useCallback(
-        async (targetPage = page, targetLimit = limit, targetCategory = category) => {
+        async (
+            targetPage = page,
+            targetLimit = limit,
+            targetCategory = category,
+            targetMainTab = mainTab
+        ) => {
             setLoading(true);
             setGlobalError("");
             try {
                 const params = new URLSearchParams({
                     page: String(targetPage),
                     limit: String(targetLimit),
-                    filter: filter === "matched" || filter === "exact_matched" || filter === "crawled" ? "all" : filter,
+                    filter: targetMainTab, // "missing" | "completed" | "all"
                     search,
                     ...(targetCategory && targetCategory !== "all" ? { category: targetCategory } : {}),
                 });
@@ -141,8 +197,9 @@ export default function BulkSpecificationPage() {
                     return;
                 }
 
+                const currentCache = sitemapMatchesRef.current;
                 const rows: SpecProductRow[] = (data.items || []).map((item: any) => {
-                    const existingMatch = sitemapMatches[item.slug];
+                    const existingMatch = currentCache[item.slug] || sitemapMatches[item.slug];
                     return {
                         ...item,
                         selected: false,
@@ -169,14 +226,14 @@ export default function BulkSpecificationPage() {
                 setLoading(false);
             }
         },
-        [page, limit, filter, search, category, sitemapMatches]
+        [page, limit, mainTab, search, category, sitemapMatches]
     );
 
     useEffect(() => {
-        fetchProducts(page, limit, category);
-    }, [page, limit, filter, category]);
+        fetchProducts(page, limit, category, mainTab);
+    }, [page, limit, mainTab, category]);
 
-    // ─── Sitemap Fetch & Auto-Match ───
+    // ─── Sitemap Fetch & Match Targeting Missing Products ───
     const handleFetchSitemaps = async () => {
         const urls = sitemapInput
             .split("\n")
@@ -193,14 +250,21 @@ export default function BulkSpecificationPage() {
         setSaveSuccessMessage("");
 
         try {
-            const localSlugs = products.map((p) => p.slug).filter(Boolean);
+            // Fetch slugs specifically based on sitemapScope ("missing" or "all")
+            const slugsRes = await fetch(
+                `/api/visual-description/specs/posts?mode=slugs&filter=${sitemapScope}`
+            );
+            const slugsData = await slugsRes.json();
+            const targetSlugs = Array.isArray(slugsData.slugs) && slugsData.slugs.length > 0
+                ? slugsData.slugs
+                : products.map((p) => p.slug).filter(Boolean);
 
             const res = await fetch("/api/visual-description/sitemap", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     sitemapUrls: urls,
-                    localSlugs,
+                    localSlugs: targetSlugs,
                 }),
             });
 
@@ -210,8 +274,12 @@ export default function BulkSpecificationPage() {
                 return;
             }
 
-            const newMatches = { ...sitemapMatches, ...(data.matches || {}) };
+            const newMatches = { ...sitemapMatchesRef.current, ...(data.matches || {}) };
+            sitemapMatchesRef.current = newMatches;
             setSitemapMatches(newMatches);
+
+            // Persist to IndexedDB (completely safe from 5MB localStorage quota)
+            await saveSitemapMatchesToCache(newMatches);
 
             setSitemapStats({
                 processed: data.totalSitemapsProcessed || urls.length,
@@ -219,6 +287,7 @@ export default function BulkSpecificationPage() {
                 matched: data.matchedCount || Object.keys(newMatches).length,
             });
 
+            // Update current on-screen products with matches
             setProducts((prev) =>
                 prev.map((p) => {
                     const match = newMatches[p.slug];
@@ -234,11 +303,32 @@ export default function BulkSpecificationPage() {
                 })
             );
 
-            setSaveSuccessMessage(`Successfully matched ${data.matchedCount || 0} products from sitemaps!`);
+            setSaveSuccessMessage(
+                `Successfully matched ${data.matchedCount || 0} products targeting ${
+                    sitemapScope === "missing" ? "Missing Specifications" : "All Products"
+                }!`
+            );
         } catch (err: any) {
             setGlobalError(err.message || "Failed to connect to sitemap service.");
         } finally {
             setIsFetchingSitemap(false);
+        }
+    };
+
+    const handleClearCachedSitemap = async () => {
+        if (confirm("Clear saved sitemap matches?")) {
+            sitemapMatchesRef.current = {};
+            setSitemapMatches({});
+            setSitemapStats(null);
+            await clearSitemapMatchesCache();
+            setProducts((prev) =>
+                prev.map((p) => ({
+                    ...p,
+                    matchedUrl: undefined,
+                    matchedImage: undefined,
+                    matchConfidence: "none",
+                }))
+            );
         }
     };
 
@@ -248,9 +338,11 @@ export default function BulkSpecificationPage() {
 
     // ─── Crawl & Convert Specifications (10 items/batch + Auto-Save) ───
     const handleCrawlProducts = async (targetProducts?: SpecProductRow[]) => {
-        const toCrawl = (targetProducts || products).filter(
-            (p) => (targetProducts ? true : p.selected) && p.matchedUrl
-        );
+        // Only crawl products with matched URLs; if crawling from Missing tab, ensure hasSpecifications is false
+        const toCrawl = (targetProducts || products).filter((p) => {
+            if (targetProducts) return !!p.matchedUrl;
+            return p.selected && p.matchedUrl;
+        });
 
         if (toCrawl.length === 0) {
             setGlobalError("No products with matched URLs selected for crawling.");
@@ -265,7 +357,9 @@ export default function BulkSpecificationPage() {
 
         const toCrawlIds = new Set(toCrawl.map((p) => p.id));
         setProducts((prev) =>
-            prev.map((p) => (toCrawlIds.has(p.id) ? { ...p, crawlStatus: "crawling", crawlError: undefined } : p))
+            prev.map((p) =>
+                toCrawlIds.has(p.id) ? { ...p, crawlStatus: "crawling", crawlError: undefined } : p
+            )
         );
 
         const BATCH_SIZE = 10;
@@ -303,7 +397,7 @@ export default function BulkSpecificationPage() {
 
                     data.results.forEach((r: any) => {
                         resultMap.set(r.id, r);
-                        if (r.success && Array.isArray(r.specifications)) {
+                        if (r.success && Array.isArray(r.specifications) && r.specifications.length > 0) {
                             itemsToAutoSave.push({ id: r.id, specifications: r.specifications });
                         }
                     });
@@ -318,13 +412,19 @@ export default function BulkSpecificationPage() {
                             });
                             if (saveRes.ok) {
                                 totalSavedCount += itemsToAutoSave.length;
+                                // Dynamically update header counters
+                                setPagination((prev) => ({
+                                    ...prev,
+                                    totalMissingCount: Math.max(0, prev.totalMissingCount - itemsToAutoSave.length),
+                                    totalCompletedCount: prev.totalCompletedCount + itemsToAutoSave.length,
+                                }));
                             }
                         } catch (saveErr) {
                             console.error("Auto-save specs error:", saveErr);
                         }
                     }
 
-                    // Update UI state
+                    // Update UI state for current chunk
                     setProducts((prev) =>
                         prev.map((p) => {
                             if (!resultMap.has(p.id)) return p;
@@ -338,6 +438,7 @@ export default function BulkSpecificationPage() {
                                     fieldCount: resItem.fieldCount,
                                     hasSpecifications: autoSave ? true : p.hasSpecifications,
                                     specifications: autoSave ? resItem.specifications : p.specifications,
+                                    justSaved: autoSave,
                                 };
                             } else {
                                 return {
@@ -369,7 +470,7 @@ export default function BulkSpecificationPage() {
         if (!stopCrawlingRef.current) {
             setSaveSuccessMessage(
                 autoSave
-                    ? `Done! Successfully crawled and auto-saved ${totalSavedCount} product specifications to database.`
+                    ? `Done! Successfully crawled and auto-saved ${totalSavedCount} product specifications to database. You can refresh or switch pages anytime.`
                     : "Crawling complete! Review specifications and click Save to Database."
             );
         }
@@ -419,11 +520,18 @@ export default function BulkSpecificationPage() {
                             hasSpecifications: true,
                             specifications: p.crawledSpecs,
                             crawlStatus: "idle",
+                            justSaved: true,
                         };
                     }
                     return p;
                 })
             );
+
+            setPagination((prev) => ({
+                ...prev,
+                totalMissingCount: Math.max(0, prev.totalMissingCount - toSave.length),
+                totalCompletedCount: prev.totalCompletedCount + toSave.length,
+            }));
 
             setSaveSuccessMessage(`Successfully saved ${data.savedCount || toSave.length} specifications to database!`);
         } catch (err: any) {
@@ -433,33 +541,74 @@ export default function BulkSpecificationPage() {
         }
     };
 
-    // ─── Selection helpers ───
-    const exactMatchedCount = useMemo(() => {
-        return products.filter((p) => p.matchedUrl && p.matchConfidence === "exact").length;
+    // ─── Sub-Filtering Logic ───
+    const filteredProducts = useMemo(() => {
+        if (subFilter === "exact_matched") {
+            return products.filter((p) => p.matchedUrl && p.matchConfidence === "exact");
+        }
+        if (subFilter === "matched") {
+            return products.filter((p) => p.matchedUrl);
+        }
+        if (subFilter === "unmatched") {
+            return products.filter((p) => !p.matchedUrl);
+        }
+        if (subFilter === "crawled") {
+            return products.filter((p) => p.crawledSpecs);
+        }
+        return products;
+    }, [products, subFilter]);
+
+    // Statistics for the current page
+    const pageStats = useMemo(() => {
+        const exact = products.filter((p) => p.matchedUrl && p.matchConfidence === "exact").length;
+        const matched = products.filter((p) => p.matchedUrl).length;
+        const unmatched = products.filter((p) => !p.matchedUrl).length;
+        const crawled = products.filter((p) => p.crawledSpecs).length;
+        const missingExact = products.filter((p) => !p.hasSpecifications && p.matchedUrl && p.matchConfidence === "exact").length;
+        return { exact, matched, unmatched, crawled, missingExact };
     }, [products]);
 
-    const filteredProducts = useMemo(() => {
-        if (filter === "matched") return products.filter((p) => p.matchedUrl);
-        if (filter === "exact_matched") return products.filter((p) => p.matchedUrl && p.matchConfidence === "exact");
-        if (filter === "crawled") return products.filter((p) => p.crawledSpecs);
-        return products;
-    }, [products, filter]);
-
+    // Crawl only 100% exact matched items that do not yet have specifications
     const handleCrawlExactMatched = () => {
-        const exactProducts = products.filter((p) => p.matchedUrl && p.matchConfidence === "exact");
+        const exactProducts = products.filter(
+            (p) => (!p.hasSpecifications || mainTab !== "missing") && p.matchedUrl && p.matchConfidence === "exact"
+        );
         if (exactProducts.length === 0) {
-            setGlobalError("No 100% exact matched products found to crawl. Fetch sitemaps first!");
+            setGlobalError("No 100% exact matched products without specifications found on this page.");
             return;
         }
         handleCrawlProducts(exactProducts);
     };
 
+    // ─── Selection helpers ───
     const selectedCount = filteredProducts.filter((p) => p.selected).length;
     const allSelected = filteredProducts.length > 0 && selectedCount === filteredProducts.length;
 
     const toggleSelectAll = () => {
         const next = !allSelected;
         setProducts((prev) => prev.map((p) => ({ ...p, selected: next })));
+    };
+
+    const selectOnlyMatched = () => {
+        setProducts((prev) =>
+            prev.map((p) => ({
+                ...p,
+                selected: !!p.matchedUrl && (!p.hasSpecifications || mainTab !== "missing"),
+            }))
+        );
+    };
+
+    const selectOnlyExactMatched = () => {
+        setProducts((prev) =>
+            prev.map((p) => ({
+                ...p,
+                selected: !!p.matchedUrl && p.matchConfidence === "exact" && (!p.hasSpecifications || mainTab !== "missing"),
+            }))
+        );
+    };
+
+    const deselectAll = () => {
+        setProducts((prev) => prev.map((p) => ({ ...p, selected: false })));
     };
 
     const toggleSelectRow = (id: string) => {
@@ -485,13 +634,13 @@ export default function BulkSpecificationPage() {
                         Bulk Product Specifications
                     </h1>
                     <p className="text-xs text-gray-500 mt-1">
-                        Crawl technical specifications from remote product pages into structured SpecificationBox categories with 10-batch auto-save.
+                        Separate Missing vs Completed products, auto-match against remote sitemaps, and crawl 10-batch specifications into MongoDB.
                     </p>
                 </div>
 
                 <div className="flex items-center gap-2">
                     <button
-                        onClick={() => fetchProducts(page, limit, category)}
+                        onClick={() => fetchProducts(page, limit, category, mainTab)}
                         disabled={loading}
                         className="px-3.5 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 shadow-sm transition-all flex items-center gap-1.5"
                     >
@@ -510,7 +659,7 @@ export default function BulkSpecificationPage() {
 
             {/* ─── Success & Error Banners ─── */}
             {saveSuccessMessage && (
-                <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-between text-xs text-emerald-800">
+                <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-between text-xs text-emerald-800 animate-in fade-in">
                     <div className="flex items-center gap-2">
                         <Icon icon="solar:check-circle-bold" className="w-5 h-5 text-emerald-600 shrink-0" />
                         <span className="font-medium">{saveSuccessMessage}</span>
@@ -522,7 +671,7 @@ export default function BulkSpecificationPage() {
             )}
 
             {globalError && (
-                <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-center justify-between text-xs text-red-800">
+                <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-center justify-between text-xs text-red-800 animate-in fade-in">
                     <div className="flex items-center gap-2">
                         <Icon icon="solar:danger-triangle-bold" className="w-5 h-5 text-red-600 shrink-0" />
                         <span className="font-medium">{globalError}</span>
@@ -543,30 +692,64 @@ export default function BulkSpecificationPage() {
                         <div>
                             <h2 className="text-sm font-bold text-gray-900">Sitemap & Specs Crawler Setup</h2>
                             <p className="text-[11px] text-gray-500">
-                                Match product slugs and extract specification boxes from target container.
+                                Match remote product pages and extract specification boxes without touching existing data.
                             </p>
                         </div>
                     </div>
 
-                    {sitemapStats && (
-                        <div className="flex items-center gap-2 text-xs">
-                            <span className="text-gray-500">
-                                URLs Found: <strong className="text-gray-800">{sitemapStats.found}</strong>
+                    <div className="flex items-center gap-2 text-xs">
+                        {sitemapStats && (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-semibold flex items-center gap-1">
+                                <Icon icon="solar:check-circle-bold" className="w-3.5 h-3.5" />
+                                {sitemapStats.matched} Saved Matches
                             </span>
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-semibold">
-                                Matched: {sitemapStats.matched}
-                            </span>
-                        </div>
-                    )}
+                        )}
+                        {Object.keys(sitemapMatches).length > 0 && (
+                            <button
+                                type="button"
+                                onClick={handleClearCachedSitemap}
+                                className="text-[11px] text-gray-400 hover:text-red-600 underline"
+                            >
+                                Clear Saved Matches
+                            </button>
+                        )}
+                    </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
                     {/* Sitemaps textarea */}
                     <div className="lg:col-span-2 space-y-1.5">
-                        <label className="text-xs font-medium text-gray-700 flex items-center justify-between">
-                            <span>Sitemap URL(s) (one per line)</span>
-                            <span className="text-gray-400 font-normal">Supports multiple & sitemap indexes</span>
-                        </label>
+                        <div className="flex items-center justify-between">
+                            <label className="text-xs font-medium text-gray-700">
+                                Sitemap URL(s) (one per line)
+                            </label>
+                            {/* Sitemap Target Scope Toggle */}
+                            <div className="flex items-center gap-2 text-[11px]">
+                                <span className="text-gray-500 font-medium">Target:</span>
+                                <label className="inline-flex items-center gap-1 cursor-pointer">
+                                    <input
+                                        type="radio"
+                                        name="sitemapScope"
+                                        checked={sitemapScope === "missing"}
+                                        onChange={() => setSitemapScope("missing")}
+                                        className="text-indigo-600 focus:ring-indigo-500 text-xs"
+                                    />
+                                    <span className="font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                                        Missing Specs Only ({pagination.totalMissingCount})
+                                    </span>
+                                </label>
+                                <label className="inline-flex items-center gap-1 cursor-pointer">
+                                    <input
+                                        type="radio"
+                                        name="sitemapScope"
+                                        checked={sitemapScope === "all"}
+                                        onChange={() => setSitemapScope("all")}
+                                        className="text-indigo-600 focus:ring-indigo-500 text-xs"
+                                    />
+                                    <span className="text-gray-600">All Products</span>
+                                </label>
+                            </div>
+                        </div>
                         <textarea
                             rows={3}
                             value={sitemapInput}
@@ -616,7 +799,7 @@ export default function BulkSpecificationPage() {
                             {isFetchingSitemap ? (
                                 <>
                                     <Icon icon="solar:refresh-circle-bold" className="w-4 h-4 animate-spin" />
-                                    Fetching & Matching Sitemaps...
+                                    Matching Sitemaps...
                                 </>
                             ) : (
                                 <>
@@ -626,83 +809,70 @@ export default function BulkSpecificationPage() {
                             )}
                         </button>
                         <p className="text-[11px] text-gray-400 mt-2 text-center">
-                            Automatically removes comparison links & subtitles.
+                            Targets {sitemapScope === "missing" ? "missing items only" : "all items"}. Cached in IndexedDB.
                         </p>
                     </div>
                 </div>
             </div>
 
-            {/* ─── Batch Operations & Filters Bar ─── */}
+            {/* ─── PRIMARY TABS: Missing Specs vs Has Specs vs All ─── */}
             <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                    {/* Status Tabs */}
-                    <div className="flex flex-wrap items-center gap-1 bg-gray-100 p-1 rounded-xl text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 pb-3">
+                    <div className="flex items-center gap-2">
+                        {/* Tab 1: Missing Specs (DEFAULT & ISOLATED) */}
                         <button
                             onClick={() => {
-                                setFilter("all");
+                                setMainTab("missing");
+                                setSubFilter("all");
                                 setPage(1);
                             }}
-                            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                                filter === "all" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-900"
+                            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+                                mainTab === "missing"
+                                    ? "bg-amber-500 text-white shadow-md shadow-amber-500/20 ring-2 ring-amber-400/40"
+                                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                             }`}
                         >
-                            All ({pagination.totalProducts})
-                        </button>
-                        <button
-                            onClick={() => {
-                                setFilter("missing");
-                                setPage(1);
-                            }}
-                            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                                filter === "missing"
-                                    ? "bg-white text-gray-900 shadow-sm"
-                                    : "text-gray-600 hover:text-gray-900"
-                            }`}
-                        >
+                            <Icon icon="solar:danger-circle-bold" className="w-4 h-4" />
                             Missing Specs ({pagination.totalMissingCount})
                         </button>
+
+                        {/* Tab 2: Has Specs (Completed) */}
                         <button
                             onClick={() => {
-                                setFilter("completed");
+                                setMainTab("completed");
+                                setSubFilter("all");
                                 setPage(1);
                             }}
-                            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                                filter === "completed"
-                                    ? "bg-white text-gray-900 shadow-sm"
-                                    : "text-gray-600 hover:text-gray-900"
+                            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+                                mainTab === "completed"
+                                    ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20 ring-2 ring-emerald-500/40"
+                                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                             }`}
                         >
-                            Has Specs ({pagination.totalCompletedCount})
+                            <Icon icon="solar:check-circle-bold" className="w-4 h-4" />
+                            Completed / Has Specs ({pagination.totalCompletedCount})
                         </button>
-                        <button
-                            onClick={() => setFilter("matched")}
-                            className={`px-3 py-1.5 rounded-lg font-medium transition-colors ${
-                                filter === "matched"
-                                    ? "bg-white text-gray-900 shadow-sm"
-                                    : "text-gray-600 hover:text-gray-900"
-                            }`}
-                        >
-                            All Matched ({Object.keys(sitemapMatches).length})
-                        </button>
+
+                        {/* Tab 3: All Products */}
                         <button
                             onClick={() => {
-                                setFilter("exact_matched");
+                                setMainTab("all");
+                                setSubFilter("all");
                                 setPage(1);
                             }}
-                            className={`px-3 py-1.5 rounded-lg font-semibold transition-colors flex items-center gap-1.5 ${
-                                filter === "exact_matched"
-                                    ? "bg-emerald-600 text-white shadow-sm"
-                                    : "text-emerald-700 hover:text-emerald-900 hover:bg-emerald-50"
+                            className={`px-4 py-2 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 ${
+                                mainTab === "all"
+                                    ? "bg-gray-900 text-white shadow-sm"
+                                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
                             }`}
                         >
-                            <Icon icon="solar:check-circle-bold" className="w-3.5 h-3.5" />
-                            100% Matched ({exactMatchedCount})
+                            <Icon icon="solar:box-minimalistic-bold" className="w-3.5 h-3.5" />
+                            All Products ({pagination.totalProducts})
                         </button>
                     </div>
 
-                    {/* Action buttons */}
-                    <div className="flex flex-wrap items-center gap-2">
-                        {/* Auto-Save Toggle */}
+                    {/* Auto-Save Toggle */}
+                    <div className="flex items-center gap-2">
                         <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer select-none bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl hover:bg-emerald-100/60 transition-colors">
                             <input
                                 type="checkbox"
@@ -715,8 +885,76 @@ export default function BulkSpecificationPage() {
                                 Continuous Auto-Save (Every 10)
                             </span>
                         </label>
+                    </div>
+                </div>
 
-                        {/* Stop Crawling Button (shown when crawling is active) */}
+                {/* Sub-Filters and Crawl Actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    {/* Sub-Filter Pills */}
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                        <span className="text-gray-400 font-medium mr-1 text-[11px]">Filter on Page:</span>
+                        <button
+                            onClick={() => setSubFilter("all")}
+                            className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                                subFilter === "all"
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                            }`}
+                        >
+                            All on Page ({products.length})
+                        </button>
+
+                        <button
+                            onClick={() => setSubFilter("exact_matched")}
+                            className={`px-2.5 py-1 rounded-lg font-semibold transition-colors flex items-center gap-1 ${
+                                subFilter === "exact_matched"
+                                    ? "bg-emerald-600 text-white shadow-xs"
+                                    : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200"
+                            }`}
+                        >
+                            <Icon icon="solar:check-circle-bold" className="w-3.5 h-3.5" />
+                            100% Matched ({pageStats.exact})
+                        </button>
+
+                        <button
+                            onClick={() => setSubFilter("matched")}
+                            className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                                subFilter === "matched"
+                                    ? "bg-blue-600 text-white shadow-xs"
+                                    : "bg-blue-50 text-blue-700 hover:bg-blue-100"
+                            }`}
+                        >
+                            All Matched ({pageStats.matched})
+                        </button>
+
+                        <button
+                            onClick={() => setSubFilter("unmatched")}
+                            className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                                subFilter === "unmatched"
+                                    ? "bg-gray-700 text-white shadow-xs"
+                                    : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                            }`}
+                        >
+                            Unmatched ({pageStats.unmatched})
+                        </button>
+
+                        {pageStats.crawled > 0 && (
+                            <button
+                                onClick={() => setSubFilter("crawled")}
+                                className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                                    subFilter === "crawled"
+                                        ? "bg-purple-600 text-white shadow-xs"
+                                        : "bg-purple-50 text-purple-700 hover:bg-purple-100"
+                                }`}
+                            >
+                                Crawled ({pageStats.crawled})
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex flex-wrap items-center gap-2">
+                        {/* Stop Crawling Button */}
                         {isBatchCrawling && (
                             <button
                                 type="button"
@@ -733,12 +971,12 @@ export default function BulkSpecificationPage() {
                             <button
                                 type="button"
                                 onClick={handleCrawlExactMatched}
-                                disabled={exactMatchedCount === 0}
+                                disabled={pageStats.exact === 0}
                                 className="px-4 py-2 bg-linear-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-40"
-                                title="Crawl all 100% exact matched specifications (10 per batch with auto-save)"
+                                title="Crawl 100% exact matched specifications (10 per batch with auto-save)"
                             >
                                 <Icon icon="solar:check-read-bold" className="w-4 h-4" />
-                                Crawl 100% Matched ({exactMatchedCount})
+                                Crawl 100% Matched ({mainTab === "missing" ? pageStats.missingExact : pageStats.exact})
                             </button>
                         )}
 
@@ -775,7 +1013,7 @@ export default function BulkSpecificationPage() {
                     </div>
                 </div>
 
-                {/* Search & Category Filter */}
+                {/* Search, Categories & Page Size */}
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-gray-100 text-xs">
                     <div className="flex items-center gap-3 flex-1 min-w-70">
                         <div className="relative flex-1">
@@ -787,7 +1025,13 @@ export default function BulkSpecificationPage() {
                                 type="text"
                                 value={search}
                                 onChange={(e) => setSearch(e.target.value)}
-                                placeholder="Search products by title or slug..."
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                        setPage(1);
+                                        fetchProducts(1, limit, category, mainTab);
+                                    }
+                                }}
+                                placeholder="Search products by title or slug... (Press Enter)"
                                 className="w-full pl-9 pr-3 py-1.5 border border-gray-200 rounded-lg outline-none focus:border-indigo-500"
                             />
                         </div>
@@ -811,6 +1055,41 @@ export default function BulkSpecificationPage() {
                         )}
                     </div>
 
+                    {/* Quick Selection Helpers */}
+                    <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-gray-400">Select:</span>
+                        <button
+                            type="button"
+                            onClick={selectOnlyExactMatched}
+                            className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-[11px] font-semibold border border-emerald-200"
+                        >
+                            100% Matched
+                        </button>
+                        <button
+                            type="button"
+                            onClick={selectOnlyMatched}
+                            className="px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 text-[11px] font-medium"
+                        >
+                            All Matched
+                        </button>
+                        <button
+                            type="button"
+                            onClick={toggleSelectAll}
+                            className="px-2 py-1 rounded bg-gray-100 text-gray-700 hover:bg-gray-200 text-[11px] font-medium"
+                        >
+                            {allSelected ? "Uncheck All" : "All Page"}
+                        </button>
+                        {selectedCount > 0 && (
+                            <button
+                                type="button"
+                                onClick={deselectAll}
+                                className="text-[11px] text-red-500 hover:underline ml-1"
+                            >
+                                Clear
+                            </button>
+                        )}
+                    </div>
+
                     <div className="flex items-center gap-2 text-gray-500">
                         <span>Items per page:</span>
                         <select
@@ -819,7 +1098,7 @@ export default function BulkSpecificationPage() {
                                 const newLimit = Number(e.target.value);
                                 setLimit(newLimit);
                                 setPage(1);
-                                fetchProducts(1, newLimit);
+                                fetchProducts(1, newLimit, category, mainTab);
                             }}
                             className="px-2 py-1 border border-gray-200 rounded-lg outline-none bg-white text-xs font-semibold text-gray-700"
                         >
@@ -870,7 +1149,7 @@ export default function BulkSpecificationPage() {
                             ) : filteredProducts.length === 0 ? (
                                 <tr>
                                     <td colSpan={5} className="p-12 text-center text-gray-400">
-                                        No products found for the selected filter.
+                                        No products found in this view.
                                     </td>
                                 </tr>
                             ) : (
@@ -883,7 +1162,7 @@ export default function BulkSpecificationPage() {
                                         <tr
                                             key={row.id}
                                             className={`hover:bg-gray-50/80 transition-colors ${
-                                                row.selected ? "bg-indigo-50/30" : ""
+                                                row.selected ? "bg-indigo-50/30" : row.justSaved ? "bg-emerald-50/40" : ""
                                             }`}
                                         >
                                             <td className="p-4">
@@ -1026,11 +1305,21 @@ export default function BulkSpecificationPage() {
                                                             <Icon icon="solar:danger-triangle-bold" className="w-3.5 h-3.5" />
                                                             Crawl Error
                                                         </span>
+                                                    ) : row.justSaved ? (
+                                                        <div className="space-y-0.5">
+                                                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-600 text-white shadow-xs">
+                                                                <Icon icon="solar:check-circle-bold" className="w-3.5 h-3.5" />
+                                                                Saved to DB ✓
+                                                            </span>
+                                                            <div className="text-[11px] text-gray-500 font-medium">
+                                                                {boxCount} boxes • {fieldCount} fields
+                                                            </div>
+                                                        </div>
                                                     ) : row.crawledSpecs ? (
                                                         <div className="space-y-0.5">
                                                             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
                                                                 <Icon icon="solar:check-circle-bold" className="w-3.5 h-3.5" />
-                                                                {row.hasSpecifications ? "Saved" : "Crawled (Ready)"}
+                                                                Crawled (Ready)
                                                             </span>
                                                             <div className="text-[11px] text-gray-500 font-medium">
                                                                 {boxCount} boxes • {fieldCount} fields
@@ -1047,7 +1336,7 @@ export default function BulkSpecificationPage() {
                                                             </div>
                                                         </div>
                                                     ) : (
-                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
                                                             <Icon icon="solar:minus-circle-linear" className="w-3.5 h-3.5" />
                                                             Missing
                                                         </span>
@@ -1120,7 +1409,7 @@ export default function BulkSpecificationPage() {
                 <div className="p-4 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3 text-xs text-gray-600">
                     <div>
                         Showing {(page - 1) * limit + 1} to {Math.min(page * limit, pagination.total)} of{" "}
-                        <strong className="text-gray-900">{pagination.total}</strong> products
+                        <strong className="text-gray-900">{pagination.total}</strong> products in current filter
                     </div>
 
                     <div className="flex items-center gap-1.5">
@@ -1293,7 +1582,10 @@ export default function BulkSpecificationPage() {
                                                     slug: p.slug,
                                                     confidence: "manual" as const,
                                                 };
-                                                setSitemapMatches((m) => ({ ...m, [p.slug]: updatedMatch }));
+                                                const updated = { ...sitemapMatchesRef.current, [p.slug]: updatedMatch };
+                                                sitemapMatchesRef.current = updated;
+                                                setSitemapMatches(updated);
+                                                saveSitemapMatchesToCache(updated);
                                                 return {
                                                     ...p,
                                                     matchedUrl: currentUrl.trim(),

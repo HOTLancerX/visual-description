@@ -63,6 +63,14 @@ export async function GET(req: Request) {
             query._id = { $in: completedPostIds };
         }
 
+        if (searchParams.get("mode") === "slugs") {
+            const slugPosts = await Post.find(query).select("slug").lean();
+            return NextResponse.json({
+                success: true,
+                slugs: slugPosts.map((p: any) => p.slug).filter(Boolean),
+            });
+        }
+
         const total = await Post.countDocuments(query);
         const skip = (page - 1) * limit;
 
