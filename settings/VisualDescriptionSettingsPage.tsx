@@ -12,9 +12,8 @@
  * allowing product visual descriptions to render with exact design fidelity.
  */
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { Icon } from "@iconify/react";
-import useSettings from "@/lib/useSettings";
 import { xFetch } from "@/lib/express";
 import VisualDescriptionRenderer from "../ui/VisualDescriptionRenderer";
 import { XIAOMI_MASTER_PREBUILT_CSS } from "../presets/xiaomiPrebuiltCss";
@@ -24,62 +23,77 @@ import { parseHtmlToVisualData } from "../lib/htmlToJsonParser";
 const DEFAULT_PREBUILT_CSS = XIAOMI_MASTER_PREBUILT_CSS;
 
 export default function VisualDescriptionSettingsPage() {
-    const { settings, loading, refresh } = useSettings();
-
     const [cssValue, setCssValue] = useState("");
+    const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
     const [activeTab, setActiveTab] = useState<"editor" | "preview">("editor");
 
-    // Initialize from settings or fallback to Xiaomi Master CSS
-    useEffect(() => {
-        if (loading) return;
-        const currentCss = settings.visual_description_css;
-        if (typeof currentCss === "string" && currentCss.trim()) {
-            setCssValue(currentCss);
-        } else {
-            setCssValue(XIAOMI_MASTER_PREBUILT_CSS);
+    // Load saved CSS dynamically from database via Express /settings
+    const loadSavedCss = useCallback(async () => {
+        setLoading(true);
+        try {
+            const res = await xFetch("/settings?title=visual_description_css", { cache: "no-store" });
+            if (res.ok) {
+                const data = await res.json();
+                const val = data?.content ?? data?.visual_description_css;
+                if (typeof val === "string" && val.trim().length > 0) {
+                    setCssValue(val);
+                    setLoading(false);
+                    return;
+                }
+            }
+        } catch (err) {
+            console.error("Error loading visual description CSS:", err);
         }
-    }, [loading, settings]);
 
-    // Handle Save
+        // Fallback to default starter preset if not configured in DB yet
+        setCssValue(DEFAULT_PREBUILT_CSS);
+        setLoading(false);
+    }, []);
+
+    useEffect(() => {
+        loadSavedCss();
+    }, [loadSavedCss]);
+
+    // Handle Save via Express /settings
     const handleSave = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
         setSaving(true);
         setMessage(null);
 
-        try {
-            const payload = {
-                visual_description_css: cssValue,
-            };
+        const payload = {
+            visual_description_css: cssValue,
+        };
 
+        try {
             const res = await xFetch("/settings", {
                 method: "PUT",
                 body: JSON.stringify(payload),
             });
+            const data = await res.json().catch(() => ({}));
 
-            const data = await res.json();
-
-            if (!res.ok) {
+            if (res.ok) {
                 setMessage({
-                    text: data.error || "Failed to save CSS settings",
-                    type: "error",
-                });
-            } else {
-                setMessage({
-                    text: "Pre-built CSS saved successfully! It will now be loaded dynamically server-side.",
+                    text: "Pre-built CSS saved successfully! It will now be loaded dynamically across the site.",
                     type: "success",
                 });
                 try {
                     localStorage.setItem("cms_settings_updated", Date.now().toString());
                     window.dispatchEvent(new Event("cms_settings_updated"));
-                } catch {}
-                refresh();
+                } catch {
+                    /* localStorage may be unavailable */
+                }
                 setTimeout(() => setMessage(null), 5000);
+            } else {
+                setMessage({
+                    text: data.error || data.message || "Failed to save CSS settings",
+                    type: "error",
+                });
             }
-        } catch {
+        } catch (err: any) {
             setMessage({
-                text: "Network error while saving settings.",
+                text: `Network error while saving settings: ${err?.message || "Connection failed"}`,
                 type: "error",
             });
         } finally {

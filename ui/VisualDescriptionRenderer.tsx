@@ -264,7 +264,14 @@ export default function VisualDescriptionRenderer({
         tabButtons.forEach((btn) => btn.addEventListener("click", handleTabClick));
 
         // 4. Product Tour accordions & arrows
-        const tourStages = Array.from(root.querySelectorAll<HTMLElement>("[data-product-tour], .ndovu-tour-stage, .ndovu-tour-surface"));
+        const allTourContainers = Array.from(root.querySelectorAll<HTMLElement>("[data-product-tour], .ndovu-tour-stage, .ndovu-tour-surface"));
+        // Filter out parent containers if children have [data-product-tour] or .ndovu-tour-stage
+        const tourStages = allTourContainers.filter((el) => {
+            if (el.classList.contains("ndovu-tour-surface") && el.querySelector(".ndovu-tour-stage, [data-product-tour]")) {
+                return false;
+            }
+            return true;
+        });
         const cleanupTourFns: (() => void)[] = [];
 
         tourStages.forEach((stage) => {
@@ -784,6 +791,360 @@ export default function VisualDescriptionRenderer({
             className={`${className}`}
             suppressHydrationWarning
         >
+            {/* Guarantee pre-built CSS is rendered inline for full design fidelity */}
+            {globalPrebuiltCss && (
+                <style
+                    id="visual-description-prebuilt-inline-css"
+                    dangerouslySetInnerHTML={{ __html: globalPrebuiltCss }}
+                />
+            )}
+
+            {/* Custom per-product CSS if provided */}
+            {customCss && (
+                <style
+                    id="visual-description-custom-inline-css"
+                    dangerouslySetInnerHTML={{ __html: customCss }}
+                />
+            )}
+
+            {/* Tour & Story explicit responsive layout overrides */}
+            <style
+                dangerouslySetInnerHTML={{
+                    __html: `
+/* Ndovu Tour Surface & Stage Robust Layout */
+.ndovu-tour-surface {
+    position: relative !important;
+    background: #ffffff !important;
+    border-radius: 28px !important;
+    border: 1px solid rgba(0, 0, 0, 0.08) !important;
+    overflow: hidden !important;
+    width: 100% !important;
+    margin: 32px 0 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-expand {
+    position: absolute !important;
+    top: 24px !important;
+    right: 24px !important;
+    z-index: 10 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+    border-radius: 50% !important;
+    background: #475569 !important;
+    color: #ffffff !important;
+    border: none !important;
+    cursor: pointer !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-expand svg {
+    width: 20px !important;
+    height: 20px !important;
+    fill: none !important;
+    stroke: currentColor !important;
+    stroke-width: 2 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-stage {
+    display: grid !important;
+    grid-template-columns: 44px minmax(280px, 0.42fr) minmax(0, 1fr) !important;
+    gap: 28px !important;
+    align-items: center !important;
+    min-height: 560px !important;
+    padding: 48px 40px 48px 24px !important;
+    box-sizing: border-box !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-nav {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+    z-index: 5 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-nav button {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+    border-radius: 50% !important;
+    background: #e2e8f0 !important;
+    color: #334155 !important;
+    border: none !important;
+    cursor: pointer !important;
+    transform: none !important;
+    transition: opacity 0.2s ease, background 0.2s ease !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-nav button:hover:not(:disabled) {
+    background: #cbd5e1 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-nav button:disabled {
+    opacity: 0.35 !important;
+    cursor: default !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-nav svg {
+    width: 20px !important;
+    height: 20px !important;
+    stroke: currentColor !important;
+    stroke-width: 2.5 !important;
+    fill: none !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-controls {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 12px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item {
+    width: auto !important;
+    max-width: 100% !important;
+    border-radius: 28px !important;
+    margin: 0 !important;
+    transition: all 0.25s ease !important;
+    box-sizing: border-box !important;
+}
+
+/* Active / Expanded Tour Item Card */
+.ndovu-tour-surface .ndovu-tour-item:has(button[aria-expanded="true"]) {
+    width: 100% !important;
+    background: #e8e8ed !important;
+    padding: 24px 28px !important;
+    border-radius: 28px !important;
+    color: #1e293b !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item:has(button[aria-expanded="true"]) h3 {
+    display: inline !important;
+    margin: 0 !important;
+    font-size: inherit !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item button[aria-expanded="true"] {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    background: #475569 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 9999px !important;
+    padding: 8px 18px !important;
+    font-weight: 700 !important;
+    font-size: 13px !important;
+    line-height: 1.2 !important;
+    vertical-align: middle !important;
+    margin-right: 12px !important;
+    white-space: nowrap !important;
+    min-height: 0 !important;
+    width: auto !important;
+    box-shadow: none !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item button[aria-expanded="true"] .ndovu-tour-plus {
+    display: none !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item:has(button[aria-expanded="true"]) .ndovu-tour-caption:not([hidden]) {
+    display: inline !important;
+    font-size: 15px !important;
+    line-height: 1.5 !important;
+    color: #1e293b !important;
+    vertical-align: middle !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item:has(button[aria-expanded="true"]) .ndovu-tour-caption p {
+    display: inline !important;
+    margin: 0 !important;
+    font-size: inherit !important;
+    line-height: inherit !important;
+    color: inherit !important;
+}
+
+/* Inactive / Collapsed Tour Item Pill Buttons */
+.ndovu-tour-surface .ndovu-tour-item:not(:has(button[aria-expanded="true"])) {
+    background: transparent !important;
+    padding: 0 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item:not(:has(button[aria-expanded="true"])) h3 {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item button:not([aria-expanded="true"]) {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    background: #475569 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 9999px !important;
+    padding: 10px 20px !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    line-height: 1.2 !important;
+    cursor: pointer !important;
+    white-space: nowrap !important;
+    min-height: 42px !important;
+    width: auto !important;
+    box-shadow: none !important;
+    transition: background 0.2s ease, transform 0.2s ease !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item button:not([aria-expanded="true"]):hover {
+    background: #334155 !important;
+    transform: translateY(-1px) !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item button:not([aria-expanded="true"]) .ndovu-tour-plus {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 18px !important;
+    height: 18px !important;
+    min-width: 18px !important;
+    flex-shrink: 0 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item button:not([aria-expanded="true"]) .ndovu-tour-plus svg {
+    width: 18px !important;
+    height: 18px !important;
+    fill: none !important;
+    stroke: currentColor !important;
+    stroke-width: 2 !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-item:not(:has(button[aria-expanded="true"])) .ndovu-tour-caption {
+    display: none !important;
+}
+
+/* Tour Panels Showcase (Right Column) */
+.ndovu-tour-surface .ndovu-tour-panels {
+    position: relative !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 460px !important;
+    overflow: hidden !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-panel[hidden] {
+    display: none !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-panel:not([hidden]) {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 100% !important;
+    animation: ndovu-tour-fade 0.3s ease-out !important;
+}
+
+@keyframes ndovu-tour-fade {
+    from { opacity: 0; transform: scale(0.98); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.ndovu-tour-surface .ndovu-tour-panel .ndovu-scene-media {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-panel picture {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-panel img,
+.ndovu-tour-surface .ndovu-tour-panel video {
+    display: block !important;
+    max-width: 100% !important;
+    max-height: 520px !important;
+    height: auto !important;
+    object-fit: contain !important;
+}
+
+.ndovu-tour-surface .ndovu-tour-mobile-nav {
+    display: none !important;
+}
+
+/* Responsive Viewports */
+@media (max-width: 900px) {
+    .ndovu-tour-surface .ndovu-tour-stage {
+        grid-template-columns: 40px minmax(240px, 0.45fr) minmax(0, 1fr) !important;
+        gap: 16px !important;
+        padding: 32px 20px 32px 16px !important;
+    }
+}
+
+@media (max-width: 767px) {
+    .ndovu-tour-surface .ndovu-tour-stage {
+        display: flex !important;
+        flex-direction: column !important;
+        padding: 24px 16px 28px !important;
+        gap: 20px !important;
+        min-height: auto !important;
+    }
+    .ndovu-tour-surface .ndovu-tour-nav {
+        display: none !important;
+    }
+    .ndovu-tour-surface .ndovu-tour-panels {
+        order: 1 !important;
+        min-height: 300px !important;
+        max-height: 360px !important;
+    }
+    .ndovu-tour-surface .ndovu-tour-controls {
+        order: 2 !important;
+        width: 100% !important;
+    }
+    .ndovu-tour-surface .ndovu-tour-mobile-nav {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        position: absolute !important;
+        inset: 0 !important;
+        pointer-events: none !important;
+    }
+    .ndovu-tour-surface .ndovu-tour-mobile-nav button {
+        pointer-events: auto !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 40px !important;
+        height: 40px !important;
+        border-radius: 50% !important;
+        background: #e2e8f0 !important;
+        color: #334155 !important;
+        border: none !important;
+        cursor: pointer !important;
+    }
+}
+`
+                }}
+            />
+
             {/* Render 100% Authentic Original HTML */}
             <div
                 dangerouslySetInnerHTML={{ __html: rawHtml }}

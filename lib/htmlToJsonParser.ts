@@ -36,7 +36,7 @@ function classifySectionType(el: Element): VisualSectionType {
     if (cls.includes("scene-gallery") || cls.includes("ndovu-scene-cards") || el.getAttribute("data-cards-mode") === "carousel") {
         return "scene-gallery";
     }
-    if (cls.includes("scene-accordion") || cls.includes("ndovu-tour") || el.getAttribute("data-viewer-style") === "product-tour") {
+    if (cls.includes("scene-accordion") || cls.includes("ndovu-tour") || el.getAttribute("data-viewer-style") === "product-tour" || el.hasAttribute("data-product-tour") || el.querySelector(".ndovu-tour-stage, [data-product-tour]")) {
         return "scene-accordion";
     }
     if (cls.includes("scene-metrics") || el.querySelector(".ndovu-scene-metrics, dl")) {
@@ -374,7 +374,7 @@ export function parseHtmlToVisualData(
 
         // Find all candidate section elements
         let sectionEls = Array.from(
-            doc.querySelectorAll(".ndovu-why, article.ndovu-scene, .ndovu-catalog-compare, .xiaomi-story")
+            doc.querySelectorAll(".ndovu-why, article.ndovu-scene, .ndovu-catalog-compare, .xiaomi-story, .ndovu-tour-surface, [data-product-tour]")
         );
 
         // If none of those specialized classes were found, grab top-level sections / articles
